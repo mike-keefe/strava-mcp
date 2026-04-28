@@ -16,6 +16,7 @@ import http from "node:http";
 import { URL } from "node:url";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // Load env from .dev.vars if the values aren't already in process.env
@@ -176,7 +177,6 @@ server.listen(PORT, () => {
 
   // Open browser
   const platform = process.platform;
-  const { execSync } = await import("node:child_process");
   try {
     if (platform === "darwin") {
       execSync(`open "${authUrl}"`);
