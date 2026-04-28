@@ -105,15 +105,15 @@ See **issue #12** for the full first-deploy walkthrough.
 
 ## Available tools
 
-| Tool | Description | Issue |
-|------|-------------|-------|
-| `get_athlete_profile` | Athlete profile (name, FTP, weight, zones config) | #3 |
-| `get_recent_activities` | List activities with filters (type, date range, limit) | #4 |
-| `get_activity_details` | Full activity breakdown — laps, splits, best efforts, segments | #5 |
-| `get_activity_streams` | Raw per-second stream data (HR, pace, cadence, altitude, etc.) | #6 |
-| `get_activity_zones` | HR and power zone distribution for an activity | #7 |
-| `get_athlete_zones` | Athlete's configured HR and power zone thresholds | #8 |
-| `get_athlete_stats` | Recent / YTD / all-time totals by sport | #9 |
+| Tool | Description | Status |
+|------|-------------|--------|
+| `get_athlete_profile` | Athlete profile: name, location, weight, FTP, measurement preference | ✅ |
+| `get_recent_activities` | List activities with filters: type, date range, limit (default 30, max 200) | ✅ |
+| `get_activity_details` | Full activity: laps, splits, best efforts, segment efforts, all metadata | ✅ |
+| `get_activity_streams` | Raw per-second stream data (HR, pace, cadence, altitude, etc.) — no smoothing | ✅ |
+| `get_activity_zones` | HR and power zone distribution for an activity, as Strava reports it | ✅ |
+| `get_athlete_zones` | Athlete's configured HR and power zone thresholds | ✅ |
+| `get_athlete_stats` | Recent (4 weeks) / YTD / all-time totals by sport | ✅ |
 | `get_segment_details` | Segment info and athlete PR | #13 |
 | `list_my_segment_efforts` | All efforts on a segment over time | #14 |
 | `get_segment_effort_streams` | Per-second streams for a single segment effort | #15 |
