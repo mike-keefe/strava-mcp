@@ -121,10 +121,10 @@ The Worker runs locally at `http://localhost:8787`. Use the same `Authorization:
 | `get_activity_zones` | HR and power zone distribution for an activity, as Strava reports it | ✅ |
 | `get_athlete_zones` | Athlete's configured HR and power zone thresholds | ✅ |
 | `get_athlete_stats` | Recent (4 weeks) / YTD / all-time totals by sport | ✅ |
-| `get_segment_details` | Segment info and athlete PR | #13 |
-| `list_my_segment_efforts` | All efforts on a segment over time | #14 |
-| `get_segment_effort_streams` | Per-second streams for a single segment effort | #15 |
-| `explore_segments` | Find segments in a bounding box | #16 |
+| `get_segment_details` | Segment info, grade, elevation, effort counts, athlete PR | ✅ |
+| `list_my_segment_efforts` | All efforts on a segment over time, with date filters | ✅ |
+| `get_segment_effort_streams` | Per-second streams for a single segment effort | ✅ |
+| `explore_segments` | Find segments in a bounding box (up to 10 results) | ✅ |
 | `list_routes` | Saved routes | #17 |
 | `get_route_details` | Full route with stream data | #18 |
 | `list_gear` | Bikes and shoes with mileage | #19 |
