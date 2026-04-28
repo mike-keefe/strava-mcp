@@ -1,5 +1,12 @@
 import { StravaApiError } from "./client.js";
 
+// Throws StravaApiError so handleStravaError can map the status to a known code.
+export function assertOk(res: Response): void {
+  if (!res.ok) {
+    throw new StravaApiError(res.status, res.statusText || `HTTP ${res.status}`);
+  }
+}
+
 export type McpErrorCode =
   | "STRAVA_RATE_LIMIT"
   | "STRAVA_AUTH"

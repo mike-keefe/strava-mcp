@@ -1,12 +1,50 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StravaClient } from "./client.js";
-import { handleStravaError } from "./errors.js";
+import { handleStravaError, assertOk } from "./errors.js";
 import { fetchActivityStreams } from "./streams.js";
 import type { StreamType } from "./types.js";
 
 function ok(data: unknown): { content: [{ type: "text"; text: string }] } {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+const MAX_FILTER_PAGES = 10;
+const FILTER_PAGE_SIZE = 200;
+
+// Exported for unit testing. Paginates /athlete/activities in fixed-size pages
+// and accumulates activities matching activityType until limit is reached or
+// MAX_FILTER_PAGES is exhausted — whichever comes first.
+export async function fetchFilteredActivities(
+  client: Pick<StravaClient, "fetch">,
+  limit: number,
+  activityType: string,
+  before?: number,
+  after?: number
+): Promise<unknown[]> {
+  const matches: unknown[] = [];
+  let page = 1;
+  while (matches.length < limit && page <= MAX_FILTER_PAGES) {
+    const params = new URLSearchParams({
+      page: String(page),
+      per_page: String(FILTER_PAGE_SIZE),
+    });
+    if (before) params.set("before", String(before));
+    if (after) params.set("after", String(after));
+    const res = await client.fetch(`/athlete/activities?${params}`);
+    assertOk(res);
+    const pageData = (await res.json()) as unknown[];
+    for (const a of pageData) {
+      const act = a as Record<string, unknown>;
+      if (act["type"] === activityType || act["sport_type"] === activityType) {
+        matches.push(a);
+        if (matches.length >= limit) break;
+      }
+    }
+    if (pageData.length < FILTER_PAGE_SIZE) break; // no more activities on Strava
+    page++;
+  }
+  return matches;
 }
 
 export function registerStravaTools(
@@ -22,7 +60,7 @@ export function registerStravaTools(
     async () => {
       try {
         const res = await client.fetch("/athlete");
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -42,6 +80,12 @@ export function registerStravaTools(
     },
     async ({ limit, before, after, activity_type }) => {
       try {
+        if (activity_type) {
+          return ok(
+            await fetchFilteredActivities(client, limit, activity_type, before, after)
+          );
+        }
+        // Unfiltered path — unchanged: page with per_page=limit to minimise API calls
         const activities: unknown[] = [];
         let page = 1;
         while (activities.length < limit) {
@@ -50,21 +94,14 @@ export function registerStravaTools(
           if (before) params.set("before", String(before));
           if (after) params.set("after", String(after));
           const res = await client.fetch(`/athlete/activities?${params}`);
-          if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+          assertOk(res);
           const page_data = (await res.json()) as unknown[];
           if (page_data.length === 0) break;
           activities.push(...page_data);
           if (page_data.length < perPage) break;
           page++;
         }
-        const filtered = activity_type
-          ? activities.filter(
-              (a) =>
-                (a as Record<string, unknown>)["type"] === activity_type ||
-                (a as Record<string, unknown>)["sport_type"] === activity_type
-            )
-          : activities;
-        return ok(filtered.slice(0, limit));
+        return ok(activities.slice(0, limit));
       } catch (err) {
         return handleStravaError(err);
       }
@@ -81,7 +118,7 @@ export function registerStravaTools(
     async ({ activity_id }) => {
       try {
         const res = await client.fetch(`/activities/${activity_id}`);
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -145,7 +182,7 @@ export function registerStravaTools(
     async ({ activity_id }) => {
       try {
         const res = await client.fetch(`/activities/${activity_id}/zones`);
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -161,7 +198,7 @@ export function registerStravaTools(
     async () => {
       try {
         const res = await client.fetch("/athlete/zones");
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -178,10 +215,10 @@ export function registerStravaTools(
       try {
         // Need athlete ID first
         const athleteRes = await client.fetch("/athlete");
-        if (!athleteRes.ok) throw Object.assign(new Error(athleteRes.statusText), { status: athleteRes.status });
+        assertOk(athleteRes);
         const athlete = (await athleteRes.json()) as { id: number };
         const statsRes = await client.fetch(`/athletes/${athlete.id}/stats`);
-        if (!statsRes.ok) throw Object.assign(new Error(statsRes.statusText), { status: statsRes.status });
+        assertOk(statsRes);
         return ok(await statsRes.json());
       } catch (err) {
         return handleStravaError(err);
@@ -199,7 +236,7 @@ export function registerStravaTools(
     async ({ segment_id }) => {
       try {
         const res = await client.fetch(`/segments/${segment_id}`);
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -223,7 +260,7 @@ export function registerStravaTools(
         if (start_date_local) params.set("start_date_local", start_date_local);
         if (end_date_local) params.set("end_date_local", end_date_local);
         const res = await client.fetch(`/segments/${segment_id}/all_efforts?${params}`);
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -253,7 +290,7 @@ export function registerStravaTools(
         const res = await client.fetch(
           `/segment_efforts/${effort_id}/streams?keys=${keys}&resolution=all&series_type=time`
         );
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         const streamsArray = (await res.json()) as { type: string; data: unknown[] }[];
         const present = streamsArray.map((s) => s.type);
         const requested = stream_types ?? ["time", "distance", "altitude", "latlng"];
@@ -291,7 +328,7 @@ export function registerStravaTools(
         const params = new URLSearchParams({ bounds });
         if (activity_type) params.set("activity_type", activity_type);
         const res = await client.fetch(`/segments/explore?${params}`);
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -310,11 +347,11 @@ export function registerStravaTools(
     async ({ page, per_page }) => {
       try {
         const athleteRes = await client.fetch("/athlete");
-        if (!athleteRes.ok) throw Object.assign(new Error(athleteRes.statusText), { status: athleteRes.status });
+        assertOk(athleteRes);
         const athlete = (await athleteRes.json()) as { id: number };
         const params = new URLSearchParams({ page: String(page), per_page: String(per_page) });
         const res = await client.fetch(`/athletes/${athlete.id}/routes?${params}`);
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
@@ -335,7 +372,7 @@ export function registerStravaTools(
           client.fetch(`/routes/${route_id}`),
           client.fetch(`/routes/${route_id}/streams`),
         ]);
-        if (!routeRes.ok) throw Object.assign(new Error(routeRes.statusText), { status: routeRes.status });
+        assertOk(routeRes);
         const route = await routeRes.json();
         let streams: unknown = null;
         if (streamsRes.ok) {
@@ -356,7 +393,7 @@ export function registerStravaTools(
     async () => {
       try {
         const res = await client.fetch("/athlete");
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         const athlete = (await res.json()) as { bikes?: unknown[]; shoes?: unknown[] };
         return ok({ bikes: athlete.bikes ?? [], shoes: athlete.shoes ?? [] });
       } catch (err) {
@@ -375,7 +412,7 @@ export function registerStravaTools(
     async ({ activity_id }) => {
       try {
         const res = await client.fetch(`/activities/${activity_id}/laps`);
-        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        assertOk(res);
         return ok(await res.json());
       } catch (err) {
         return handleStravaError(err);
