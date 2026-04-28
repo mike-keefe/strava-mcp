@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler } from "agents/mcp";
-import { validateBearerToken, unauthorizedResponse } from "./auth.js";
+import { extractBearerToken, isStaticTokenValid, unauthorizedResponse } from "./auth.js";
+import { isOAuthPath, handleOAuth, isValidOAuthToken } from "./oauth.js";
 import { StravaClient } from "./strava/client.js";
 import { registerStravaTools } from "./strava/tools.js";
 import type { Env } from "./types.js";
@@ -26,8 +27,21 @@ function buildMcpServer(env: Env): McpServer {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (!validateBearerToken(request, env.MCP_AUTH_TOKEN)) {
-      return unauthorizedResponse();
+    const url = new URL(request.url);
+
+    // OAuth endpoints are unauthenticated — must be handled before the token check
+    if (isOAuthPath(url.pathname)) {
+      return handleOAuth(request, env);
+    }
+
+    // Accept static admin token (fast path) OR a KV-stored OAuth access token
+    const token = extractBearerToken(request);
+    const isValid =
+      token !== null &&
+      (isStaticTokenValid(token, env.MCP_AUTH_TOKEN) ||
+        (await isValidOAuthToken(token, env)));
+    if (!isValid) {
+      return unauthorizedResponse(url.origin);
     }
 
     const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
