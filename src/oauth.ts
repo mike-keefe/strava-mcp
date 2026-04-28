@@ -7,10 +7,20 @@ const KV = {
   code: (c: string) => `oauth:code:${c}`,
   token: (t: string) => `oauth:token:${t}`,
   client: (id: string) => `oauth:client:${id}`,
+  session: (s: string) => `oauth:session:${s}`,
 };
 
+const SESSION_TTL_SECONDS = 600; // 10 min to complete Strava auth
 const CODE_TTL_SECONDS = 600; // 10 minutes
 const TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60; // 1 year
+
+const STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize";
+const STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token";
+const STRAVA_SCOPES = "read,activity:read_all,profile:read_all";
+
+// Shared with StravaClient — per-user Strava access token cache key
+export const stravaTokenCacheKey = (oauthToken: string) =>
+  `strava:cached:${oauthToken}`;
 
 // ---------------------------------------------------------------------------
 // Routing
@@ -37,9 +47,11 @@ export async function handleOAuth(request: Request, env: Env): Promise<Response>
   if (pathname === "/oauth/register" && request.method === "POST") {
     return dynamicRegistration(request, env, origin);
   }
-  if (pathname === "/oauth/authorize") {
-    if (request.method === "GET") return authorizeGet(request, env, origin);
-    if (request.method === "POST") return authorizePost(request, env, origin);
+  if (pathname === "/oauth/authorize" && request.method === "GET") {
+    return authorizeGet(request, env, origin);
+  }
+  if (pathname === "/oauth/strava-callback" && request.method === "GET") {
+    return stravaCallback(request, env, origin);
   }
   if (pathname === "/oauth/token" && request.method === "POST") {
     return tokenEndpoint(request, env, origin);
@@ -68,9 +80,9 @@ function authServerMetadata(origin: string): Response {
     registration_endpoint: `${origin}/oauth/register`,
     scopes_supported: ["mcp"],
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code", "client_credentials"],
+    grant_types_supported: ["authorization_code"],
     code_challenge_methods_supported: ["S256"],
-    token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+    token_endpoint_auth_methods_supported: ["none"],
   });
 }
 
@@ -111,13 +123,9 @@ async function dynamicRegistration(
   }
 
   const clientId = generateToken();
-  // Public clients (PKCE) don't need a client_secret
-  const isPublic = body["token_endpoint_auth_method"] === "none";
-  const clientSecret = isPublic ? null : generateToken();
-
   const record: ClientRecord = {
     client_id: clientId,
-    client_secret: clientSecret,
+    client_secret: null,
     redirect_uris: redirectUris as string[],
     client_name: typeof body["client_name"] === "string" ? body["client_name"] : undefined,
   };
@@ -127,27 +135,25 @@ async function dynamicRegistration(
   return json(
     {
       client_id: clientId,
-      ...(clientSecret ? { client_secret: clientSecret } : {}),
       redirect_uris: redirectUris,
       grant_types: ["authorization_code"],
       response_types: ["code"],
-      token_endpoint_auth_method: isPublic ? "none" : "client_secret_post",
+      token_endpoint_auth_method: "none",
     },
     201
   );
 }
 
 // ---------------------------------------------------------------------------
-// Authorization endpoint
+// Authorization endpoint — redirects to Strava
 // ---------------------------------------------------------------------------
 
-interface AuthParams {
+interface SessionRecord {
   clientId: string;
   redirectUri: string;
   state: string;
   codeChallenge: string;
   codeChallengeMethod: string;
-  scope?: string;
 }
 
 async function authorizeGet(
@@ -172,7 +178,6 @@ async function authorizeGet(
     return oauthError("invalid_request", "Missing required parameters");
   }
 
-  // Validate registered client
   const clientRaw = await env.TOKEN_CACHE.get(KV.client(clientId));
   if (!clientRaw) {
     return oauthError("invalid_client", "Unknown client_id");
@@ -182,66 +187,110 @@ async function authorizeGet(
     return oauthError("invalid_request", "redirect_uri not registered for this client");
   }
 
-  const clientName = client.client_name ?? clientId;
-
-  return new Response(authorizePage({ clientName, clientId, redirectUri, state, codeChallenge, codeChallengeMethod, origin }), {
-    headers: { "Content-Type": "text/html;charset=UTF-8" },
+  // Save OAuth session so the Strava callback can complete the flow
+  const sessionId = generateToken();
+  const session: SessionRecord = { clientId, redirectUri, state, codeChallenge, codeChallengeMethod };
+  await env.TOKEN_CACHE.put(KV.session(sessionId), JSON.stringify(session), {
+    expirationTtl: SESSION_TTL_SECONDS,
   });
+
+  // Redirect user to Strava's consent screen
+  const stravaUrl = new URL(STRAVA_AUTH_URL);
+  stravaUrl.searchParams.set("client_id", env.STRAVA_CLIENT_ID);
+  stravaUrl.searchParams.set("redirect_uri", `${origin}/oauth/strava-callback`);
+  stravaUrl.searchParams.set("response_type", "code");
+  stravaUrl.searchParams.set("approval_prompt", "force");
+  stravaUrl.searchParams.set("scope", STRAVA_SCOPES);
+  stravaUrl.searchParams.set("state", sessionId);
+  return Response.redirect(stravaUrl.toString(), 302);
 }
 
-async function authorizePost(
+// ---------------------------------------------------------------------------
+// Strava callback — completes the OAuth flow
+// ---------------------------------------------------------------------------
+
+interface StravaTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+}
+
+async function stravaCallback(
   request: Request,
   env: Env,
-  origin: string
+  _origin: string
 ): Promise<Response> {
-  let body: URLSearchParams;
-  try {
-    body = new URLSearchParams(await request.text());
-  } catch {
-    return oauthError("invalid_request", "Invalid form body");
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const sessionId = url.searchParams.get("state");
+  const error = url.searchParams.get("error");
+
+  if (!sessionId) {
+    return new Response("Missing state parameter", { status: 400 });
   }
 
-  const approved = body.get("approved") === "true";
-  const clientId = body.get("client_id") ?? "";
-  const redirectUri = body.get("redirect_uri") ?? "";
-  const state = body.get("state") ?? "";
-  const codeChallenge = body.get("code_challenge") ?? "";
-  const codeChallengeMethod = body.get("code_challenge_method") ?? "S256";
+  const sessionRaw = await env.TOKEN_CACHE.get(KV.session(sessionId));
+  if (!sessionRaw) {
+    return new Response("Session expired or invalid. Please start the authorization flow again.", {
+      status: 400,
+    });
+  }
+  const session = JSON.parse(sessionRaw) as SessionRecord;
+  await env.TOKEN_CACHE.delete(KV.session(sessionId));
 
-  if (!approved) {
-    const denied = new URL(redirectUri);
+  if (error) {
+    const denied = new URL(session.redirectUri);
     denied.searchParams.set("error", "access_denied");
-    if (state) denied.searchParams.set("state", state);
+    if (session.state) denied.searchParams.set("state", session.state);
     return Response.redirect(denied.toString(), 302);
   }
 
-  // Validate registered client again
-  const clientRaw = await env.TOKEN_CACHE.get(KV.client(clientId));
-  if (!clientRaw) {
-    return oauthError("invalid_client", "Unknown client_id");
-  }
-  const client = JSON.parse(clientRaw) as ClientRecord;
-  if (!client.redirect_uris.includes(redirectUri)) {
-    return oauthError("invalid_request", "redirect_uri mismatch");
+  if (!code) {
+    return new Response("Missing code parameter", { status: 400 });
   }
 
-  const code = generateToken();
-  const codeRecord: AuthParams & { used: boolean } = {
-    clientId,
-    redirectUri,
-    state,
-    codeChallenge,
-    codeChallengeMethod,
-    used: false,
-  };
-  await env.TOKEN_CACHE.put(KV.code(code), JSON.stringify(codeRecord), {
-    expirationTtl: CODE_TTL_SECONDS,
+  // Exchange Strava authorization code for tokens
+  const tokenRes = await fetch(STRAVA_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: env.STRAVA_CLIENT_ID,
+      client_secret: env.STRAVA_CLIENT_SECRET,
+      code,
+      grant_type: "authorization_code",
+    }),
   });
 
-  const redirectUrl = new URL(redirectUri);
-  redirectUrl.searchParams.set("code", code);
-  if (state) redirectUrl.searchParams.set("state", state);
-  void origin;
+  if (!tokenRes.ok) {
+    return new Response(
+      `Failed to exchange Strava authorization code (${tokenRes.status})`,
+      { status: 502 }
+    );
+  }
+
+  const stravaTokens = (await tokenRes.json()) as StravaTokenResponse;
+
+  // Issue our own authorization code, embedding the user's Strava refresh token
+  const ourCode = generateToken();
+  await env.TOKEN_CACHE.put(
+    KV.code(ourCode),
+    JSON.stringify({
+      clientId: session.clientId,
+      redirectUri: session.redirectUri,
+      state: session.state,
+      codeChallenge: session.codeChallenge,
+      codeChallengeMethod: session.codeChallengeMethod,
+      stravaRefreshToken: stravaTokens.refresh_token,
+      stravaAccessToken: stravaTokens.access_token,
+      stravaTokenExpiresAt: stravaTokens.expires_at,
+      used: false,
+    }),
+    { expirationTtl: CODE_TTL_SECONDS }
+  );
+
+  const redirectUrl = new URL(session.redirectUri);
+  redirectUrl.searchParams.set("code", ourCode);
+  if (session.state) redirectUrl.searchParams.set("state", session.state);
   return Response.redirect(redirectUrl.toString(), 302);
 }
 
@@ -256,21 +305,28 @@ async function tokenEndpoint(
 ): Promise<Response> {
   let body: URLSearchParams;
   try {
-    const text = await request.text();
-    body = new URLSearchParams(text);
+    body = new URLSearchParams(await request.text());
   } catch {
     return oauthError("invalid_request", "Invalid request body");
   }
 
   const grantType = body.get("grant_type");
-
   if (grantType === "authorization_code") {
     return handleAuthCodeGrant(body, env, origin);
   }
-  if (grantType === "client_credentials") {
-    return handleClientCredentialsGrant(body, env, origin);
-  }
   return oauthError("unsupported_grant_type", `Unsupported grant_type: ${grantType}`);
+}
+
+interface CodeRecord {
+  clientId: string;
+  redirectUri: string;
+  state: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  stravaRefreshToken: string;
+  stravaAccessToken: string;
+  stravaTokenExpiresAt: number;
+  used: boolean;
 }
 
 async function handleAuthCodeGrant(
@@ -292,7 +348,7 @@ async function handleAuthCodeGrant(
     return oauthError("invalid_grant", "Authorization code not found or expired");
   }
 
-  const codeRecord = JSON.parse(codeRaw) as AuthParams & { used: boolean };
+  const codeRecord = JSON.parse(codeRaw) as CodeRecord;
 
   if (codeRecord.used) {
     return oauthError("invalid_grant", "Authorization code already used");
@@ -307,53 +363,34 @@ async function handleAuthCodeGrant(
     return oauthError("invalid_grant", "PKCE verification failed");
   }
 
-  // Mark code as used and delete it
   await env.TOKEN_CACHE.delete(KV.code(code));
 
   const accessToken = generateToken();
+
+  // Store our token record with the user's Strava refresh token
   await env.TOKEN_CACHE.put(
     KV.token(accessToken),
-    JSON.stringify({ clientId, issuedAt: Date.now() }),
+    JSON.stringify({
+      clientId,
+      issuedAt: Date.now(),
+      stravaRefreshToken: codeRecord.stravaRefreshToken,
+    }),
     { expirationTtl: TOKEN_TTL_SECONDS }
   );
 
-  return json({
-    access_token: accessToken,
-    token_type: "Bearer",
-    expires_in: TOKEN_TTL_SECONDS,
-    scope: "mcp",
-  });
-}
-
-async function handleClientCredentialsGrant(
-  body: URLSearchParams,
-  env: Env,
-  _origin: string
-): Promise<Response> {
-  const clientId = body.get("client_id") ?? "";
-  const clientSecret = body.get("client_secret") ?? "";
-
-  if (!clientId || !clientSecret) {
-    return oauthError("invalid_client", "client_id and client_secret required");
+  // Pre-warm the Strava access token cache so the first MCP call is fast
+  const stravaTokenTtl =
+    codeRecord.stravaTokenExpiresAt - Math.floor(Date.now() / 1000) - 300;
+  if (stravaTokenTtl > 0) {
+    await env.TOKEN_CACHE.put(
+      stravaTokenCacheKey(accessToken),
+      JSON.stringify({
+        access_token: codeRecord.stravaAccessToken,
+        expires_at: codeRecord.stravaTokenExpiresAt,
+      }),
+      { expirationTtl: stravaTokenTtl }
+    );
   }
-
-  // Look up the registered client
-  const clientRaw = await env.TOKEN_CACHE.get(KV.client(clientId));
-  if (!clientRaw) {
-    return oauthError("invalid_client", "Unknown client");
-  }
-  const client = JSON.parse(clientRaw) as ClientRecord;
-
-  if (!client.client_secret || client.client_secret !== clientSecret) {
-    return oauthError("invalid_client", "Invalid client credentials");
-  }
-
-  const accessToken = generateToken();
-  await env.TOKEN_CACHE.put(
-    KV.token(accessToken),
-    JSON.stringify({ clientId, issuedAt: Date.now() }),
-    { expirationTtl: TOKEN_TTL_SECONDS }
-  );
 
   return json({
     access_token: accessToken,
@@ -402,77 +439,4 @@ function oauthError(error: string, description: string): Response {
     status: 400,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
-}
-
-// ---------------------------------------------------------------------------
-// Authorization HTML page
-// ---------------------------------------------------------------------------
-
-interface AuthPageParams {
-  clientName: string;
-  clientId: string;
-  redirectUri: string;
-  state: string;
-  codeChallenge: string;
-  codeChallengeMethod: string;
-  origin: string;
-}
-
-function authorizePage(p: AuthPageParams): string {
-  const esc = (s: string) => s.replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] ?? c)
-  );
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Authorise Strava MCP</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
-    .card{background:#fff;border-radius:12px;box-shadow:0 2px 16px rgba(0,0,0,.12);padding:2rem;max-width:420px;width:100%}
-    .logo{font-size:2rem;text-align:center;margin-bottom:1rem}
-    h1{font-size:1.25rem;font-weight:600;text-align:center;color:#111;margin-bottom:.5rem}
-    .sub{font-size:.9rem;color:#555;text-align:center;margin-bottom:1.5rem;line-height:1.5}
-    .client{background:#f8f8f8;border:1px solid #e0e0e0;border-radius:8px;padding:.75rem 1rem;font-size:.85rem;color:#333;margin-bottom:1.5rem;word-break:break-all}
-    .scopes{font-size:.85rem;color:#444;margin-bottom:1.5rem}
-    .scopes li{list-style:none;padding:.3rem 0;display:flex;align-items:center;gap:.5rem}
-    .scopes li::before{content:"✓";color:#22c55e;font-weight:700}
-    .btn-row{display:flex;gap:.75rem}
-    .btn{flex:1;padding:.7rem 1rem;border:none;border-radius:8px;font-size:.95rem;font-weight:500;cursor:pointer;transition:opacity .15s}
-    .btn-allow{background:#f97316;color:#fff}
-    .btn-deny{background:#f3f4f6;color:#374151}
-    .btn:hover{opacity:.9}
-    .warning{font-size:.8rem;color:#888;text-align:center;margin-top:1rem}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">🏃</div>
-    <h1>Authorise Strava MCP</h1>
-    <p class="sub"><strong>${esc(p.clientName)}</strong> is requesting access to your Strava running data.</p>
-    <div class="client">${esc(p.redirectUri.split("?")[0])}</div>
-    <ul class="scopes">
-      <li>Read your activities and stream data</li>
-      <li>Read your profile and zones</li>
-      <li>Read your segments and routes</li>
-    </ul>
-    <form method="POST" action="/oauth/authorize">
-      <input type="hidden" name="approved" value="true">
-      <input type="hidden" name="client_id" value="${esc(p.clientId)}">
-      <input type="hidden" name="redirect_uri" value="${esc(p.redirectUri)}">
-      <input type="hidden" name="state" value="${esc(p.state)}">
-      <input type="hidden" name="code_challenge" value="${esc(p.codeChallenge)}">
-      <input type="hidden" name="code_challenge_method" value="${esc(p.codeChallengeMethod)}">
-      <div class="btn-row">
-        <button type="submit" class="btn btn-allow">Authorise</button>
-        <button type="submit" class="btn btn-deny" formaction="/oauth/authorize"
-          onclick="this.form.querySelector('[name=approved]').value='false'">Deny</button>
-      </div>
-    </form>
-    <p class="warning">Only approve if you initiated this request.</p>
-  </div>
-</body>
-</html>`;
 }

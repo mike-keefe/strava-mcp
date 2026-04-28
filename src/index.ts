@@ -15,12 +15,9 @@ function rateLimitedResponse(): Response {
   );
 }
 
-function buildMcpServer(env: Env): McpServer {
-  const server = new McpServer({
-    name: "strava-mcp",
-    version: "0.1.0",
-  });
-  const client = new StravaClient(env);
+function buildMcpServer(env: Env, userOAuthToken?: string): McpServer {
+  const server = new McpServer({ name: "strava-mcp", version: "0.1.0" });
+  const client = new StravaClient(env, userOAuthToken);
   registerStravaTools(server, client, env.STREAM_CACHE);
   return server;
 }
@@ -29,18 +26,17 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // OAuth endpoints are unauthenticated — must be handled before the token check
+    // OAuth endpoints are unauthenticated — handle before the token check
     if (isOAuthPath(url.pathname)) {
       return handleOAuth(request, env);
     }
 
-    // Accept static admin token (fast path) OR a KV-stored OAuth access token
+    // Accept static admin token (fast, sync) OR a KV-stored OAuth access token
     const token = extractBearerToken(request);
-    const isValid =
-      token !== null &&
-      (isStaticTokenValid(token, env.MCP_AUTH_TOKEN) ||
-        (await isValidOAuthToken(token, env)));
-    if (!isValid) {
+    const isStaticAuth = token !== null && isStaticTokenValid(token, env.MCP_AUTH_TOKEN);
+    const isOAuthAuth = !isStaticAuth && token !== null && (await isValidOAuthToken(token, env));
+
+    if (!isStaticAuth && !isOAuthAuth) {
       return unauthorizedResponse(url.origin);
     }
 
@@ -50,7 +46,8 @@ export default {
       return rateLimitedResponse();
     }
 
-    const server = buildMcpServer(env);
+    // Static token uses the shared STRAVA_REFRESH_TOKEN; OAuth tokens are per-user
+    const server = buildMcpServer(env, isOAuthAuth ? token! : undefined);
     const handler = createMcpHandler(server, { route: "/mcp" });
     return handler(request, env, ctx);
   },
