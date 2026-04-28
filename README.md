@@ -1,6 +1,6 @@
 # strava-mcp
 
-A personal, single-user MCP server exposing Strava data to Claude for detailed running analysis. Read-only. Thin data layer — no analysis logic. Deployed to Cloudflare Workers.
+An MCP server exposing Strava data to Claude for detailed running analysis. Read-only. Thin data layer — no analysis logic. Deployed to Cloudflare Workers. Supports multiple users — each person connects their own Strava account via OAuth.
 
 ---
 
@@ -37,12 +37,15 @@ pnpm install
 
 1. Go to [https://www.strava.com/settings/api](https://www.strava.com/settings/api) and create an app.
 2. Fill in any name and website (e.g. `http://localhost`).
-3. Set **Authorization Callback Domain** to `localhost`.
+3. Set **Authorization Callback Domain** to your Worker domain: `strava-mcp.<your-subdomain>.workers.dev`
+   - You can update this after deploy once you know the URL; use `localhost` for now if you haven't deployed yet.
 4. Submit. Note your **Client ID** and **Client Secret** from the app page.
 
 The OAuth scopes this server uses: **`read,activity:read_all,profile:read_all`** — read-only, no write scopes ever.
 
-### 4. Get your Strava refresh token
+### 4. Get your Strava refresh token (optional — for static admin access only)
+
+This step is only needed if you want to use the server with a static `MCP_AUTH_TOKEN` Bearer header (e.g. for local testing or programmatic access). Users connecting through Claude's OAuth flow skip this entirely — they authorize directly via Strava in the browser.
 
 ```bash
 cp .dev.vars.example .dev.vars
@@ -51,7 +54,7 @@ cp .dev.vars.example .dev.vars
 pnpm get-refresh-token
 ```
 
-This opens Strava in your browser, asks you to authorise the app, and prints your refresh token to the terminal. Copy it into `.dev.vars` as `STRAVA_REFRESH_TOKEN`. The refresh token is long-lived — you only need to do this once.
+This opens Strava in your browser and prints your refresh token to the terminal. Copy it into `.dev.vars` as `STRAVA_REFRESH_TOKEN`.
 
 ### 5. Log in to Cloudflare and create KV namespaces
 
@@ -88,12 +91,22 @@ npx wrangler secret put STRAVA_REFRESH_TOKEN
 
 Paste each value when prompted.
 
-### 8. Add to Claude
+### 8. Update Strava app callback domain
+
+If you set `localhost` as the callback domain in step 3, update it now:
+
+1. Go to [https://www.strava.com/settings/api](https://www.strava.com/settings/api)
+2. Set **Authorization Callback Domain** to `strava-mcp.<your-subdomain>.workers.dev`
+3. Save.
+
+### 9. Add to Claude
 
 1. In Claude: **Settings → Connectors → Add custom connector**
 2. URL: `https://strava-mcp.<your-subdomain>.workers.dev/mcp`
-3. Add header: `Authorization: Bearer <your MCP_AUTH_TOKEN>`
-4. Save and test with: *"what's my latest activity?"*
+3. Click **Connect** — Claude will open a browser window for you to authorise with Strava.
+4. After Strava approval, test with: *"what's my latest activity?"*
+
+> **Note:** Anyone with the URL can connect their own Strava account by following the same OAuth flow. Each user's Strava tokens are stored separately.
 
 ---
 
