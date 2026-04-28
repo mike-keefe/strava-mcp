@@ -188,4 +188,114 @@ export function registerStravaTools(
       }
     }
   );
+
+  // Issue #13 — get_segment_details
+  server.tool(
+    "get_segment_details",
+    "Details for a specific Strava segment: distance, grade, elevation, effort counts, and athlete PR if any.",
+    {
+      segment_id: z.number().int().describe("The Strava segment ID"),
+    },
+    async ({ segment_id }) => {
+      try {
+        const res = await client.fetch(`/segments/${segment_id}`);
+        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        return ok(await res.json());
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // Issue #14 — list_my_segment_efforts
+  server.tool(
+    "list_my_segment_efforts",
+    "All of the athlete's efforts on a segment over time. Good for tracking improvement on a specific climb.",
+    {
+      segment_id: z.number().int().describe("The Strava segment ID"),
+      start_date_local: z.string().optional().describe("ISO 8601 start date filter, e.g. '2025-01-01T00:00:00Z'"),
+      end_date_local: z.string().optional().describe("ISO 8601 end date filter"),
+      per_page: z.number().int().min(1).max(200).default(200).describe("Max efforts to return"),
+    },
+    async ({ segment_id, start_date_local, end_date_local, per_page }) => {
+      try {
+        const params = new URLSearchParams({ per_page: String(per_page) });
+        if (start_date_local) params.set("start_date_local", start_date_local);
+        if (end_date_local) params.set("end_date_local", end_date_local);
+        const res = await client.fetch(`/segments/${segment_id}/all_efforts?${params}`);
+        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        return ok(await res.json());
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // Issue #15 — get_segment_effort_streams
+  server.tool(
+    "get_segment_effort_streams",
+    "Per-second stream data for a single segment effort. Same thin pass-through design as get_activity_streams.",
+    {
+      effort_id: z.number().int().describe("The Strava segment effort ID"),
+      stream_types: z
+        .array(
+          z.enum([
+            "time", "distance", "latlng", "altitude", "velocity_smooth",
+            "heartrate", "cadence", "watts", "temp", "moving", "grade_smooth",
+          ])
+        )
+        .optional()
+        .describe("Stream types to fetch. Defaults to time, distance, altitude, latlng"),
+    },
+    async ({ effort_id, stream_types }) => {
+      try {
+        const keys = (stream_types ?? ["time", "distance", "altitude", "latlng"]).join(",");
+        const res = await client.fetch(
+          `/segment_efforts/${effort_id}/streams?keys=${keys}&resolution=all&series_type=time`
+        );
+        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        const streamsArray = (await res.json()) as { type: string; data: unknown[] }[];
+        const present = streamsArray.map((s) => s.type);
+        const requested = stream_types ?? ["time", "distance", "altitude", "latlng"];
+        const missing = requested.filter((t) => !present.includes(t));
+        return ok({
+          metadata: {
+            stream_types_present: present,
+            stream_types_missing: missing,
+          },
+          data: Object.fromEntries(streamsArray.map((s) => [s.type, s.data])),
+        });
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // Issue #16 — explore_segments
+  server.tool(
+    "explore_segments",
+    "Find Strava segments in a bounding box. Returns up to 10 segments.",
+    {
+      bounds: z
+        .string()
+        .describe(
+          "Bounding box as 'sw_lat,sw_lng,ne_lat,ne_lng', e.g. '37.821,-122.505,37.842,-122.465'"
+        ),
+      activity_type: z
+        .enum(["running", "riding"])
+        .optional()
+        .describe("Filter by activity type"),
+    },
+    async ({ bounds, activity_type }) => {
+      try {
+        const params = new URLSearchParams({ bounds });
+        if (activity_type) params.set("activity_type", activity_type);
+        const res = await client.fetch(`/segments/explore?${params}`);
+        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        return ok(await res.json());
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
 }
