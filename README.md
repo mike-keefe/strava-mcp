@@ -1,31 +1,58 @@
 # strava-mcp
 
-An MCP server exposing Strava data to Claude for detailed running analysis. Read-only. Thin data layer — no analysis logic. Deployed to Cloudflare Workers. Supports multiple users — each person connects their own Strava account via OAuth.
+A remote [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude access to your Strava data. Ask Claude to analyse your training, explore routes, track segment PRs, or chart fitness trends — all from a conversation.
+
+Deployed to **Cloudflare Workers**. Multi-user: anyone can connect their own Strava account via OAuth. Read-only. No analysis logic lives in the server — that belongs in conversation with Claude.
 
 ---
 
-## Design philosophy
+## How it works
 
-This MCP is intentionally a thin data layer. Its job is to fetch Strava data and return it faithfully. All analysis — smoothing, outlier removal, zone interpretation, drift calculation, cross-run comparisons — happens in conversation with Claude, not inside the server.
+```
+Claude ──OAuth 2.0──▶ strava-mcp Worker ──Strava API──▶ Your activity data
+```
 
-**If you are tempted to add a smoothing parameter, a `moving_only` filter, or an `analyse_run` tool: don't.** These decisions belong in conversation, where they can be questioned, adjusted, and applied differently each time. The MCP cannot know what you want; Claude in conversation can.
-
-The one exception to "no server-side processing" is `downsample_to_seconds` on stream fetches — this exists purely for transport (large activities produce large responses), not as an analytical choice.
+When you add this as a connector in Claude, it walks you through a standard OAuth flow: you approve access on Strava's own consent screen, your tokens are stored per-user in Cloudflare KV, and Claude can then call any of the 15 available tools on your behalf.
 
 ---
 
-## First deploy — complete walkthrough
+## Available tools
 
-Follow these steps in order to go from zero to a working Claude connector.
+| Tool | What it returns |
+|------|-----------------|
+| `get_athlete_profile` | Name, location, weight, FTP, measurement preference |
+| `get_recent_activities` | Activity list with filters: type, date range, limit (default 30, max 200) |
+| `get_activity_details` | Full activity: laps, splits, best efforts, segment efforts, all metadata |
+| `get_activity_streams` | Raw per-second stream data — HR, pace, cadence, altitude, power, etc. |
+| `get_activity_zones` | HR and power zone distribution for an activity |
+| `get_activity_laps` | Manually-pressed laps for an activity |
+| `get_athlete_zones` | Your configured HR and power zone thresholds |
+| `get_athlete_stats` | Recent (4 weeks) / YTD / all-time totals by sport |
+| `get_segment_details` | Segment info: distance, grade, elevation, effort counts, your PR |
+| `list_my_segment_efforts` | All your efforts on a segment over time, with date filters |
+| `get_segment_effort_streams` | Per-second streams for a single segment effort |
+| `explore_segments` | Find segments in a bounding box (up to 10 results) |
+| `list_routes` | Your saved routes with pagination |
+| `get_route_details` | Full route metadata plus stream data (latlng, distance, altitude) |
+| `list_gear` | Bikes and shoes with mileage |
 
-### 1. Prerequisites
+### Design philosophy
 
-- Node.js 20+ (`node --version`)
-- pnpm (`npm install -g pnpm`)
-- Cloudflare account (free tier is fine): [dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up)
-- GitHub CLI authenticated: `gh auth status`
+The server is an intentionally **thin data layer**. Its job is to fetch Strava data and return it faithfully. All analysis — smoothing, outlier removal, zone interpretation, drift calculation, cross-run comparisons — happens in conversation with Claude.
 
-### 2. Clone and install
+The only server-side data transformation is `downsample_to_seconds` on stream fetches, which exists purely for transport (large activities produce large responses), not as an analytical choice. There are no `smooth`, `clean_outliers`, `moving_only`, or `analyse_run` parameters, and there never will be.
+
+---
+
+## Deploy your own
+
+### Prerequisites
+
+- **Node.js 20+** and **pnpm** (`npm install -g pnpm`)
+- **Cloudflare account** (free tier is fine) — [sign up](https://dash.cloudflare.com/sign-up)
+- **Strava API app** — [create one](https://www.strava.com/settings/api)
+
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/mike-keefe/strava-mcp
@@ -33,80 +60,58 @@ cd strava-mcp
 pnpm install
 ```
 
-### 3. Register a Strava API app
+### 2. Register a Strava API app
 
-1. Go to [https://www.strava.com/settings/api](https://www.strava.com/settings/api) and create an app.
-2. Fill in any name and website (e.g. `http://localhost`).
-3. Set **Authorization Callback Domain** to your Worker domain: `strava-mcp.<your-subdomain>.workers.dev`
-   - You can update this after deploy once you know the URL; use `localhost` for now if you haven't deployed yet.
-4. Submit. Note your **Client ID** and **Client Secret** from the app page.
+1. Go to [strava.com/settings/api](https://www.strava.com/settings/api) and create an app.
+2. Set **Authorization Callback Domain** to your Worker URL once you have it (e.g. `strava-mcp.<your-subdomain>.workers.dev`). You can set it to `localhost` for now and update it after deploy.
+3. Note your **Client ID** and **Client Secret**.
 
-The OAuth scopes this server uses: **`read,activity:read_all,profile:read_all`** — read-only, no write scopes ever.
+Scopes this server requests from Strava: `read,activity:read_all,profile:read_all` — read-only, no write scopes.
 
-### 4. Get your Strava refresh token (optional — for static admin access only)
-
-This step is only needed if you want to use the server with a static `MCP_AUTH_TOKEN` Bearer header (e.g. for local testing or programmatic access). Users connecting through Claude's OAuth flow skip this entirely — they authorize directly via Strava in the browser.
-
-```bash
-cp .dev.vars.example .dev.vars
-# Edit .dev.vars — add your STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET
-
-pnpm get-refresh-token
-```
-
-This opens Strava in your browser and prints your refresh token to the terminal. Copy it into `.dev.vars` as `STRAVA_REFRESH_TOKEN`.
-
-### 5. Log in to Cloudflare and create KV namespaces
-
-> **Skip this step** if you already have `wrangler.jsonc` populated with real KV IDs (done during initial project setup).
+### 3. Log in to Cloudflare and create KV namespaces
 
 ```bash
 npx wrangler login
 
 npx wrangler kv namespace create TOKEN_CACHE
 npx wrangler kv namespace create STREAM_CACHE
-# For local dev, also create preview namespaces:
+# Preview namespaces for local dev:
 npx wrangler kv namespace create TOKEN_CACHE --preview
 npx wrangler kv namespace create STREAM_CACHE --preview
 ```
 
 Copy the printed IDs into the `kv_namespaces` section of `wrangler.jsonc`.
 
-### 6. Deploy
+### 4. Deploy
 
 ```bash
-pnpm deploy
+pnpm run deploy
 ```
 
-The Worker URL will be printed at the end: `https://strava-mcp.<your-subdomain>.workers.dev`
+The Worker URL is printed at the end: `https://strava-mcp.<your-subdomain>.workers.dev`
 
-### 7. Set Worker secrets
+### 5. Set secrets
 
 ```bash
-npx wrangler secret put MCP_AUTH_TOKEN       # the token from your .dev.vars
 npx wrangler secret put STRAVA_CLIENT_ID
 npx wrangler secret put STRAVA_CLIENT_SECRET
-npx wrangler secret put STRAVA_REFRESH_TOKEN
+npx wrangler secret put MCP_AUTH_TOKEN   # any random string — used for direct API access
 ```
 
-Paste each value when prompted.
+> **Note:** `STRAVA_REFRESH_TOKEN` is only needed if you want to use the static `MCP_AUTH_TOKEN` admin path. Users connecting through Claude's OAuth flow don't need it.
 
-### 8. Update Strava app callback domain
+### 6. Update Strava callback domain
 
-If you set `localhost` as the callback domain in step 3, update it now:
+Go back to [strava.com/settings/api](https://www.strava.com/settings/api) and set the **Authorization Callback Domain** to your Worker's domain (e.g. `strava-mcp.<your-subdomain>.workers.dev`).
 
-1. Go to [https://www.strava.com/settings/api](https://www.strava.com/settings/api)
-2. Set **Authorization Callback Domain** to `strava-mcp.<your-subdomain>.workers.dev`
-3. Save.
-
-### 9. Add to Claude
+### 7. Connect to Claude
 
 1. In Claude: **Settings → Connectors → Add custom connector**
 2. URL: `https://strava-mcp.<your-subdomain>.workers.dev/mcp`
-3. Click **Connect** — Claude will open a browser window for you to authorise with Strava.
-4. After Strava approval, test with: *"what's my latest activity?"*
+3. Click **Connect** — Claude opens a browser window for you to authorise via Strava.
+4. Test: *"what's my latest activity?"*
 
-> **Note:** Anyone with the URL can connect their own Strava account by following the same OAuth flow. Each user's Strava tokens are stored separately.
+> Anyone with the URL can connect their own Strava account through the same OAuth flow. Each user's tokens are stored and refreshed independently in KV.
 
 ---
 
@@ -114,61 +119,85 @@ If you set `localhost` as the callback domain in step 3, update it now:
 
 ```bash
 cp .dev.vars.example .dev.vars
-# Fill in all four values in .dev.vars
+# Fill in STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, MCP_AUTH_TOKEN
+# Optionally: STRAVA_REFRESH_TOKEN (for the static auth path)
 
 pnpm dev
 ```
 
-The Worker runs locally at `http://localhost:8787`. Use the same `Authorization: Bearer` header to test.
+The Worker runs at `http://localhost:8787`. Use `Authorization: Bearer <MCP_AUTH_TOKEN>` to test directly, or run through Claude Desktop pointing at `http://localhost:8787/mcp`.
 
----
-
-## Available tools
-
-| Tool | Description | Status |
-|------|-------------|--------|
-| `get_athlete_profile` | Athlete profile: name, location, weight, FTP, measurement preference | ✅ |
-| `get_recent_activities` | List activities with filters: type, date range, limit (default 30, max 200) | ✅ |
-| `get_activity_details` | Full activity: laps, splits, best efforts, segment efforts, all metadata | ✅ |
-| `get_activity_streams` | Raw per-second stream data (HR, pace, cadence, altitude, etc.) — no smoothing | ✅ |
-| `get_activity_zones` | HR and power zone distribution for an activity, as Strava reports it | ✅ |
-| `get_athlete_zones` | Athlete's configured HR and power zone thresholds | ✅ |
-| `get_athlete_stats` | Recent (4 weeks) / YTD / all-time totals by sport | ✅ |
-| `get_segment_details` | Segment info, grade, elevation, effort counts, athlete PR | ✅ |
-| `list_my_segment_efforts` | All efforts on a segment over time, with date filters | ✅ |
-| `get_segment_effort_streams` | Per-second streams for a single segment effort | ✅ |
-| `explore_segments` | Find segments in a bounding box (up to 10 results) | ✅ |
-| `list_routes` | Saved routes with pagination | ✅ |
-| `get_route_details` | Full route metadata + stream data (latlng, distance, altitude) | ✅ |
-| `list_gear` | Bikes and shoes with mileage | ✅ |
-| `get_activity_laps` | Manually-pressed laps for an activity | ✅ |
-
----
-
-## Development scripts
+To get a Strava refresh token for the static auth path:
 
 ```bash
-pnpm dev               # local dev server (wrangler dev)
-pnpm deploy            # deploy to Cloudflare
-pnpm test              # run tests in watch mode
-pnpm test:run          # run tests once
-pnpm lint              # ESLint
-pnpm lint:fix          # ESLint with autofix
-pnpm typecheck         # TypeScript type checking
-pnpm tail              # stream live Worker logs (wrangler tail)
-pnpm get-refresh-token # run the Strava OAuth flow to get a refresh token
+pnpm get-refresh-token
 ```
+
+This opens Strava in your browser and prints the refresh token to the terminal.
 
 ---
 
-## Design philosophy (for contributors)
+## Architecture
 
-This MCP is intentionally a thin data layer. Its job is to fetch and return Strava data faithfully — nothing more. All analysis (smoothing, outlier removal, drift calculation, zone analysis, comparisons across activities) happens in conversation with Claude.
+```
+src/
+  index.ts          # Worker entry point — routing, auth, rate limiting
+  auth.ts           # Bearer token validation (static + OAuth)
+  oauth.ts          # OAuth 2.0 authorization server (RFC 6749 + PKCE + RFC 7591)
+  types.ts          # Env interface
+  strava/
+    client.ts       # Strava API client — token refresh, per-user KV caching, retries
+    tools.ts        # MCP tool registrations (15 tools)
+    streams.ts      # Stream fetching — gap detection, downsampling, caching
+    errors.ts       # Structured error responses
+    types.ts        # Shared Strava types
+scripts/
+  get-refresh-token.ts   # One-shot Strava OAuth flow for local dev
+```
 
-Concretely:
-- Streams are returned raw. No `smooth` parameter, no `clean_outliers`, no `moving_only` filter.
-- The only allowed server-side transformation is `downsample_to_seconds` (transport optimisation only).
-- No "analyse_run" or similar derived-metric tools. Those belong in conversation.
-- Gap metadata is informational — the MCP never fills or interpolates gaps.
+**KV namespaces:**
+- `TOKEN_CACHE` — OAuth tokens, Strava access tokens (per-user), registered OAuth clients
+- `STREAM_CACHE` — Cached stream responses (30-day TTL)
 
-If a future issue suggests adding analytical opinions to the MCP, push back and ask Mike to confirm.
+**Auth:**
+- `POST /oauth/register` — Dynamic client registration (RFC 7591)
+- `GET /oauth/authorize` → redirects to Strava → `GET /oauth/strava-callback` → issues our token
+- `POST /oauth/token` — Authorization Code + PKCE exchange
+- Static `MCP_AUTH_TOKEN` Bearer header also accepted (admin/testing path)
+
+---
+
+## Development
+
+```bash
+pnpm dev          # local dev server
+pnpm test         # tests in watch mode
+pnpm test:run     # tests once (61 tests across 5 files)
+pnpm typecheck    # TypeScript
+pnpm lint         # ESLint
+pnpm lint:fix     # ESLint with autofix
+pnpm tail         # stream live Worker logs
+```
+
+Tests use [Vitest](https://vitest.dev/) with `@cloudflare/vitest-pool-workers`. Tool tests run the full MCP Client ↔ Server path via `InMemoryTransport` — no mocked HTTP, real tool dispatch.
+
+---
+
+## Secrets reference
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `STRAVA_CLIENT_ID` | Yes | Strava app Client ID |
+| `STRAVA_CLIENT_SECRET` | Yes | Strava app Client Secret |
+| `MCP_AUTH_TOKEN` | Yes | Bearer token for direct API access |
+| `STRAVA_REFRESH_TOKEN` | Optional | Long-lived refresh token for the static auth path |
+
+Set via `npx wrangler secret put <NAME>`. Never commit these.
+
+---
+
+## Contributing
+
+The thin-data-layer design is intentional. Before opening a PR that adds smoothing, filtering, derived metrics, or analytical opinions to the server: don't. Those belong in conversation with Claude. If you're unsure, open an issue first.
+
+PRs welcome for: new read-only Strava endpoints, performance improvements, bug fixes, better error messages.
