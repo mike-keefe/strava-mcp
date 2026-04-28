@@ -16,12 +16,38 @@ The one exception to "no server-side processing" is `downsample_to_seconds` on s
 
 ## Strava app setup
 
-1. Go to [developers.strava.com](https://www.strava.com/settings/api) and create an app.
-2. Set **Authorization Callback Domain** to `localhost` for now.
-3. Note your **Client ID** and **Client Secret**.
-4. The exact OAuth scopes this server uses: `read,activity:read_all,profile:read_all`
-   - `activity:write`, `profile:write`, and all other write scopes must **never** be requested. This MCP is read-only by design.
-5. After getting your Client ID and Secret, follow **issue #1** to obtain your refresh token.
+### Step 1 — Register a Strava API app
+
+1. Go to [https://www.strava.com/settings/api](https://www.strava.com/settings/api) and create an app.
+2. Fill in any name and website (e.g. `http://localhost`).
+3. Set **Authorization Callback Domain** to `localhost`.
+4. Submit. Note your **Client ID** and **Client Secret** from the app page.
+
+The exact OAuth scopes this server requests: **`read,activity:read_all,profile:read_all`**
+
+`activity:write`, `profile:write`, and all other write scopes are never requested — this MCP is read-only by design.
+
+### Step 2 — Get your refresh token
+
+Add your Client ID and Secret to `.dev.vars`, then run:
+
+```bash
+pnpm get-refresh-token
+```
+
+This opens Strava in your browser, asks you to authorise the app, captures the callback, and prints your refresh token to the terminal. The refresh token is long-lived (doesn't expire unless you revoke it) — you only need to run this once.
+
+Copy the printed `STRAVA_REFRESH_TOKEN` into your `.dev.vars` file.
+
+### Step 3 — Set Cloudflare Worker secrets (after deploying)
+
+```bash
+npx wrangler secret put STRAVA_CLIENT_ID
+npx wrangler secret put STRAVA_CLIENT_SECRET
+npx wrangler secret put STRAVA_REFRESH_TOKEN
+```
+
+Paste each value when prompted. These secrets are stored encrypted by Cloudflare and never appear in your code or wrangler.jsonc.
 
 ---
 
@@ -111,5 +137,6 @@ pnpm test:run   # run tests once
 pnpm lint       # ESLint
 pnpm lint:fix   # ESLint with autofix
 pnpm typecheck  # TypeScript type checking
-pnpm tail       # stream live Worker logs (wrangler tail)
+pnpm tail              # stream live Worker logs (wrangler tail)
+pnpm get-refresh-token # run the Strava OAuth flow to get a refresh token
 ```
