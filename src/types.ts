@@ -1,6 +1,7 @@
 export interface Env {
   TOKEN_CACHE: KVNamespace;
   STREAM_CACHE: KVNamespace;
+  IP_RATE_LIMITER: RateLimit;
   MCP_AUTH_TOKEN: string;
   STRAVA_CLIENT_ID: string;
   STRAVA_CLIENT_SECRET: string;

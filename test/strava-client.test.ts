@@ -21,6 +21,7 @@ function makeEnv(kv: KVNamespace): Env {
   return {
     TOKEN_CACHE: kv,
     STREAM_CACHE: {} as KVNamespace,
+    IP_RATE_LIMITER: {} as RateLimit,
     MCP_AUTH_TOKEN: "test-token",
     STRAVA_CLIENT_ID: "client123",
     STRAVA_CLIENT_SECRET: "secret456",
