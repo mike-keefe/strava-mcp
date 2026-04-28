@@ -1,0 +1,24 @@
+{
+  "name": "strava-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-28",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "kv_namespaces": [
+    {
+      "binding": "TOKEN_CACHE",
+      "id": "c4bc105f15da4c619e290b63f1d8ec54",
+      "preview_id": "2709771661f24411969d987f02c25713"
+    },
+    {
+      "binding": "STREAM_CACHE",
+      "id": "f0f561b3755544738c6b5ebaa96b1fdb",
+      "preview_id": "5f8bd6e6ed2d4a32adc37ab9cf6a9852"
+    }
+  ],
+
+  // Observability
+  "observability": {
+    "enabled": true
+  }
+}
