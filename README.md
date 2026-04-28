@@ -125,10 +125,10 @@ The Worker runs locally at `http://localhost:8787`. Use the same `Authorization:
 | `list_my_segment_efforts` | All efforts on a segment over time, with date filters | ✅ |
 | `get_segment_effort_streams` | Per-second streams for a single segment effort | ✅ |
 | `explore_segments` | Find segments in a bounding box (up to 10 results) | ✅ |
-| `list_routes` | Saved routes | #17 |
-| `get_route_details` | Full route with stream data | #18 |
-| `list_gear` | Bikes and shoes with mileage | #19 |
-| `get_activity_laps` | Manually-pressed laps for an activity | #20 |
+| `list_routes` | Saved routes with pagination | ✅ |
+| `get_route_details` | Full route metadata + stream data (latlng, distance, altitude) | ✅ |
+| `list_gear` | Bikes and shoes with mileage | ✅ |
+| `get_activity_laps` | Manually-pressed laps for an activity | ✅ |
 
 ---
 

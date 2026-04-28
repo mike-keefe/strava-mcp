@@ -298,4 +298,88 @@ export function registerStravaTools(
       }
     }
   );
+
+  // Issue #17 — list_routes
+  server.tool(
+    "list_routes",
+    "Lists the athlete's saved routes.",
+    {
+      page: z.number().int().min(1).default(1).describe("Page number"),
+      per_page: z.number().int().min(1).max(200).default(30).describe("Routes per page"),
+    },
+    async ({ page, per_page }) => {
+      try {
+        const athleteRes = await client.fetch("/athlete");
+        if (!athleteRes.ok) throw Object.assign(new Error(athleteRes.statusText), { status: athleteRes.status });
+        const athlete = (await athleteRes.json()) as { id: number };
+        const params = new URLSearchParams({ page: String(page), per_page: String(per_page) });
+        const res = await client.fetch(`/athletes/${athlete.id}/routes?${params}`);
+        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        return ok(await res.json());
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // Issue #18 — get_route_details
+  server.tool(
+    "get_route_details",
+    "Full details for a saved route including stream data (latlng, distance, altitude — Strava API limitation for routes).",
+    {
+      route_id: z.number().int().describe("The Strava route ID"),
+    },
+    async ({ route_id }) => {
+      try {
+        const [routeRes, streamsRes] = await Promise.all([
+          client.fetch(`/routes/${route_id}`),
+          client.fetch(`/routes/${route_id}/streams`),
+        ]);
+        if (!routeRes.ok) throw Object.assign(new Error(routeRes.statusText), { status: routeRes.status });
+        const route = await routeRes.json();
+        let streams: unknown = null;
+        if (streamsRes.ok) {
+          streams = await streamsRes.json();
+        }
+        return ok({ route, streams });
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // Issue #19 — list_gear
+  server.tool(
+    "list_gear",
+    "The athlete's bikes and shoes with mileage. Useful for tracking when shoes are due to be retired.",
+    {},
+    async () => {
+      try {
+        const res = await client.fetch("/athlete");
+        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        const athlete = (await res.json()) as { bikes?: unknown[]; shoes?: unknown[] };
+        return ok({ bikes: athlete.bikes ?? [], shoes: athlete.shoes ?? [] });
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // Issue #20 — get_activity_laps
+  server.tool(
+    "get_activity_laps",
+    "Manually-pressed laps for an activity (the laps the athlete pressed the lap button for, not auto-splits).",
+    {
+      activity_id: z.number().int().describe("The Strava activity ID"),
+    },
+    async ({ activity_id }) => {
+      try {
+        const res = await client.fetch(`/activities/${activity_id}/laps`);
+        if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+        return ok(await res.json());
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
 }
