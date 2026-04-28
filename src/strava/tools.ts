@@ -128,10 +128,12 @@ export async function fetchFilteredActivities(
 export function registerStravaTools(
   server: McpServer,
   client: StravaClient,
-  env: Env
+  env: Env,
+  userOAuthToken?: string
 ): void {
   const streamCache = env.STREAM_CACHE;
   const tokenCache = env.TOKEN_CACHE;
+  const userPrefix = userOAuthToken ?? "static";
   // Issue #3 — get_athlete_profile
   server.tool(
     "get_athlete_profile",
@@ -309,6 +311,7 @@ export function registerStravaTools(
           laps,
           timeRangeSeconds: time_range_seconds,
           distanceRangeMeters: distance_range_meters,
+          userPrefix,
         });
         return ok(result);
       } catch (err) {

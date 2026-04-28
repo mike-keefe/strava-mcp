@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>strava-mcp — Strava for Claude</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e8e8e8;
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      border-bottom: 1px solid #222;
+      padding: 1.5rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    header .badge {
+      background: #fc4c02;
+      color: #fff;
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.2rem 0.55rem;
+      border-radius: 3px;
+    }
+
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 4rem 2rem;
+      flex: 1;
+    }
+
+    .hero h2 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1.15;
+      margin-bottom: 1.25rem;
+    }
+
+    .hero p {
+      font-size: 1.1rem;
+      color: #aaa;
+      max-width: 540px;
+      margin-bottom: 2rem;
+    }
+
+    .cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #fc4c02;
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.95rem;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      text-decoration: none;
+      transition: background 0.15s;
+    }
+
+    .cta:hover { background: #e04402; }
+
+    .cta-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      border: 1px solid #333;
+      color: #ccc;
+      font-weight: 500;
+      font-size: 0.95rem;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      text-decoration: none;
+      margin-left: 0.75rem;
+      transition: border-color 0.15s, color 0.15s;
+    }
+
+    .cta-secondary:hover { border-color: #666; color: #fff; }
+
+    .diagram {
+      background: #161616;
+      border: 1px solid #222;
+      border-radius: 8px;
+      padding: 1.5rem 2rem;
+      margin: 3rem 0;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.85rem;
+      color: #888;
+      text-align: center;
+    }
+
+    .diagram .arrow { color: #fc4c02; }
+
+    section { margin: 3.5rem 0; }
+
+    section h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-bottom: 1.25rem;
+      color: #fff;
+    }
+
+    .tools-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .tool {
+      background: #161616;
+      border: 1px solid #222;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+    }
+
+    .tool code {
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.78rem;
+      color: #fc4c02;
+      display: block;
+      margin-bottom: 0.3rem;
+    }
+
+    .tool p {
+      font-size: 0.82rem;
+      color: #888;
+    }
+
+    .steps ol {
+      list-style: none;
+      counter-reset: steps;
+    }
+
+    .steps ol li {
+      counter-increment: steps;
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+      align-items: flex-start;
+    }
+
+    .steps ol li::before {
+      content: counter(steps);
+      background: #222;
+      border: 1px solid #333;
+      color: #aaa;
+      font-size: 0.75rem;
+      font-weight: 700;
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 0.1rem;
+    }
+
+    .steps li p { color: #aaa; font-size: 0.95rem; }
+    .steps li strong { color: #e8e8e8; }
+
+    .privacy-note {
+      background: #161616;
+      border: 1px solid #222;
+      border-left: 3px solid #fc4c02;
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      font-size: 0.88rem;
+      color: #999;
+    }
+
+    .privacy-note a { color: #fc4c02; text-decoration: none; }
+    .privacy-note a:hover { text-decoration: underline; }
+
+    footer {
+      border-top: 1px solid #1a1a1a;
+      padding: 2rem;
+      text-align: center;
+      font-size: 0.8rem;
+      color: #555;
+    }
+
+    footer a { color: #888; text-decoration: none; }
+    footer a:hover { color: #ccc; }
+
+    .strava-attribution {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .strava-attribution img { height: 20px; opacity: 0.6; }
+
+    @media (max-width: 600px) {
+      .hero h2 { font-size: 1.75rem; }
+      .cta-secondary { margin-left: 0; margin-top: 0.75rem; }
+      .cta, .cta-secondary { display: flex; width: 100%; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>strava-mcp</h1>
+  <span class="badge">Open Source</span>
+</header>
+
+<main>
+  <div class="hero">
+    <h2>Your Strava data,<br>inside Claude.</h2>
+    <p>A remote MCP server that connects Claude to your Strava account. Ask Claude to analyse training trends, explore segments, compare efforts, and more — all in conversation.</p>
+    <a class="cta" href="https://github.com/mike-keefe/strava-mcp">View on GitHub</a>
+    <a class="cta-secondary" href="privacy.html">Privacy policy</a>
+  </div>
+
+  <div class="diagram">
+    Claude <span class="arrow">──OAuth 2.0──▶</span> strava-mcp Worker <span class="arrow">──Strava API──▶</span> Your activity data
+  </div>
+
+  <section>
+    <h3>15 read-only tools</h3>
+    <div class="tools-grid">
+      <div class="tool"><code>get_athlete_profile</code><p>Name, location, weight, FTP</p></div>
+      <div class="tool"><code>get_recent_activities</code><p>Activity list with filters</p></div>
+      <div class="tool"><code>get_activity_details</code><p>Full activity breakdown</p></div>
+      <div class="tool"><code>get_activity_streams</code><p>Raw per-second data</p></div>
+      <div class="tool"><code>get_activity_zones</code><p>HR &amp; power zone distribution</p></div>
+      <div class="tool"><code>get_activity_laps</code><p>Manually-pressed laps</p></div>
+      <div class="tool"><code>get_athlete_zones</code><p>Your zone thresholds</p></div>
+      <div class="tool"><code>get_athlete_stats</code><p>Recent / YTD / all-time totals</p></div>
+      <div class="tool"><code>get_segment_details</code><p>Segment info &amp; your PR</p></div>
+      <div class="tool"><code>list_my_segment_efforts</code><p>All efforts on a segment</p></div>
+      <div class="tool"><code>get_segment_effort_streams</code><p>Per-second segment streams</p></div>
+      <div class="tool"><code>explore_segments</code><p>Find segments in a bounding box</p></div>
+      <div class="tool"><code>list_routes</code><p>Your saved routes</p></div>
+      <div class="tool"><code>get_route_details</code><p>Route metadata &amp; streams</p></div>
+      <div class="tool"><code>list_gear</code><p>Bikes &amp; shoes with mileage</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h3>Deploy your own in 7 steps</h3>
+    <div class="steps">
+      <ol>
+        <li><p><strong>Clone the repo</strong> and run <code>pnpm install</code>.</p></li>
+        <li><p><strong>Create a Strava API app</strong> at <a href="https://www.strava.com/settings/api" style="color:#fc4c02">strava.com/settings/api</a>. Note your Client ID and Secret.</p></li>
+        <li><p><strong>Create a Cloudflare account</strong> (free tier works) and run <code>npx wrangler login</code>.</p></li>
+        <li><p><strong>Create KV namespaces</strong> with <code>npx wrangler kv namespace create TOKEN_CACHE</code> and <code>STREAM_CACHE</code>. Paste the IDs into <code>wrangler.jsonc</code>.</p></li>
+        <li><p><strong>Deploy</strong> with <code>pnpm run deploy</code>. Your Worker URL is printed at the end.</p></li>
+        <li><p><strong>Set secrets</strong> — <code>STRAVA_CLIENT_ID</code>, <code>STRAVA_CLIENT_SECRET</code>, <code>MCP_AUTH_TOKEN</code> — via <code>npx wrangler secret put</code>.</p></li>
+        <li><p><strong>Add the connector in Claude</strong>: Settings → Connectors → Add custom connector → paste your Worker URL + <code>/mcp</code>.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <div class="privacy-note">
+      <strong>Privacy:</strong> This server is a thin pass-through. It stores only the OAuth tokens needed to call the Strava API on your behalf. No activity data is stored permanently. You can revoke access at any time from Strava's connected apps page or by disconnecting the connector in Claude. <a href="privacy.html">Full privacy policy →</a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="strava-attribution">
+    <svg height="20" viewBox="0 0 100 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Powered by Strava">
+      <text x="0" y="15" fill="#fc4c02" font-family="-apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="0.5">Powered by Strava</text>
+    </svg>
+  </div>
+  <p>
+    <a href="https://github.com/mike-keefe/strava-mcp">GitHub</a> &middot;
+    <a href="privacy.html">Privacy</a> &middot;
+    <a href="https://developers.strava.com">Strava API</a>
+  </p>
+</footer>
+
+</body>
+</html>

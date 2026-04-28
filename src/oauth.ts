@@ -56,6 +56,9 @@ export async function handleOAuth(request: Request, env: Env): Promise<Response>
   if (pathname === "/oauth/token" && request.method === "POST") {
     return tokenEndpoint(request, env, origin);
   }
+  if (pathname === "/oauth/revoke" && request.method === "POST") {
+    return revokeEndpoint(request, env);
+  }
   return new Response("Not Found", { status: 404 });
 }
 
@@ -78,11 +81,13 @@ function authServerMetadata(origin: string): Response {
     authorization_endpoint: `${origin}/oauth/authorize`,
     token_endpoint: `${origin}/oauth/token`,
     registration_endpoint: `${origin}/oauth/register`,
+    revocation_endpoint: `${origin}/oauth/revoke`,
     scopes_supported: ["mcp"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
+    revocation_endpoint_auth_methods_supported: ["none"],
   });
 }
 
@@ -398,6 +403,45 @@ async function handleAuthCodeGrant(
     expires_in: TOKEN_TTL_SECONDS,
     scope: "mcp",
   });
+}
+
+// ---------------------------------------------------------------------------
+// Revocation endpoint (RFC 7009)
+// ---------------------------------------------------------------------------
+
+async function revokeEndpoint(request: Request, env: Env): Promise<Response> {
+  let body: URLSearchParams;
+  try {
+    body = new URLSearchParams(await request.text());
+  } catch {
+    return oauthError("invalid_request", "Invalid request body");
+  }
+
+  const token = body.get("token");
+  if (!token) {
+    return oauthError("invalid_request", "token parameter is required");
+  }
+
+  // RFC 7009 §2.2: unknown/already-revoked tokens MUST return 200
+  const exists = await env.TOKEN_CACHE.get(KV.token(token));
+  if (!exists) {
+    return new Response(null, { status: 200 });
+  }
+
+  // Delete our token record and the cached Strava access token in parallel
+  await Promise.all([
+    env.TOKEN_CACHE.delete(KV.token(token)),
+    env.TOKEN_CACHE.delete(stravaTokenCacheKey(token)),
+  ]);
+
+  // Delete any stream cache entries for this user
+  const streamPrefix = `${token}:streams:`;
+  const listed = await env.STREAM_CACHE.list({ prefix: streamPrefix });
+  if (listed.keys.length > 0) {
+    await Promise.all(listed.keys.map((k) => env.STREAM_CACHE.delete(k.name)));
+  }
+
+  return new Response(null, { status: 200 });
 }
 
 // ---------------------------------------------------------------------------

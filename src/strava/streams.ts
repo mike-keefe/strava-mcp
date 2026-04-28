@@ -19,6 +19,7 @@ export interface StreamsParams {
   timeRangeSeconds?: { start?: number; end?: number };
   // Inclusive distance range in metres along the distance stream.
   distanceRangeMeters?: { start?: number; end?: number };
+  userPrefix?: string;
 }
 
 // Anything below this in m/s (~ 22:13 / km) is treated as stopped for the
@@ -152,6 +153,7 @@ export async function fetchActivityStreams(
     laps,
     timeRangeSeconds,
     distanceRangeMeters,
+    userPrefix = "static",
   } = params;
   // The user-facing `resolution` parameter is currently a no-op: Strava only
   // accepts low | medium | high (rejects "all") and we always fetch high to
@@ -162,10 +164,9 @@ export async function fetchActivityStreams(
     ALL_STREAM_TYPES.includes(t)
   );
 
-  // Per-activity cache (activities are immutable). The cached payload always
-  // contains the full safe stream set Strava actually returned; we filter to
-  // the user's requested types on the way out.
-  const cacheKey = `streams:${activityId}:all`;
+  // Cache key includes user prefix so entries can be deleted on token revocation.
+  // The cached payload contains the full safe stream set Strava returned.
+  const cacheKey = `${userPrefix}:streams:${activityId}:all`;
   const cached = await readCachedStreams(streamCache, cacheKey);
 
   let rawStreams: Record<string, RawStream>;
