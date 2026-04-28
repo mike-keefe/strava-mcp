@@ -1,0 +1,13 @@
+# Copy this file to .dev.vars and fill in real values for local development.
+# .dev.vars is gitignored — never commit it.
+
+# Generated during initial setup. Use the same value for wrangler secret put MCP_AUTH_TOKEN
+MCP_AUTH_TOKEN=your_generated_token_here
+
+# From developers.strava.com — your app's Client ID and Secret
+STRAVA_CLIENT_ID=your_strava_client_id
+STRAVA_CLIENT_SECRET=your_strava_client_secret
+
+# Obtained by running: pnpm tsx scripts/get-refresh-token.ts (see issue #1)
+# Requires scopes: read,activity:read_all,profile:read_all
+STRAVA_REFRESH_TOKEN=your_strava_refresh_token
