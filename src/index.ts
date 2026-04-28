@@ -11,7 +11,7 @@ function buildMcpServer(env: Env): McpServer {
     version: "0.1.0",
   });
   const client = new StravaClient(env);
-  registerStravaTools(server, client);
+  registerStravaTools(server, client, env.STREAM_CACHE);
   return server;
 }
 
