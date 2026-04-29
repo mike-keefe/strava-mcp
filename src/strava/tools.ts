@@ -181,6 +181,24 @@ export function registerStravaTools(
         .describe(
           "If true, include a lap_index array (0-based lap each sample falls within) alongside the streams."
         ),
+      time_range_seconds: z
+        .object({
+          start: z.number().optional(),
+          end: z.number().optional(),
+        })
+        .optional()
+        .describe(
+          "Optional inclusive window in elapsed seconds. Use to pull only a portion of the activity (e.g. last 5 minutes). Either bound may be omitted."
+        ),
+      distance_range_meters: z
+        .object({
+          start: z.number().optional(),
+          end: z.number().optional(),
+        })
+        .optional()
+        .describe(
+          "Optional inclusive window along the distance stream in metres (e.g. {start: 10000, end: 15000} for kilometres 10–15). Either bound may be omitted."
+        ),
     },
     async ({
       activity_id,
@@ -190,6 +208,8 @@ export function registerStravaTools(
       format,
       units,
       include_lap_index,
+      time_range_seconds,
+      distance_range_meters,
     }) => {
       try {
         // Sport-aware defaults and 'auto' units mode both need sport_type. The
@@ -216,6 +236,8 @@ export function registerStravaTools(
           sportType,
           units: units as "raw" | "running" | "cycling" | "auto" | undefined,
           laps,
+          timeRangeSeconds: time_range_seconds,
+          distanceRangeMeters: distance_range_meters,
         });
         return ok(result);
       } catch (err) {
@@ -481,6 +503,32 @@ export function registerStravaTools(
         const res = await client.fetch(`/activities/${activity_id}/laps`);
         assertOk(res);
         return ok(await res.json());
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // get_activity_best_efforts — projects the Strava-computed best_efforts
+  // array off the activity detail. Strava already calculates 1k / 1mi / 5k /
+  // 10k / half / full PRs for every Run; this tool returns just that subset
+  // so consumers don't have to pull the full activity payload.
+  server.tool(
+    "get_activity_best_efforts",
+    "Returns Strava's pre-computed best efforts (1k, 1mi, 5k, 10k, half marathon, marathon) for a Run activity, including pr_rank when the effort was a PR. Rides have no best_efforts; the response will be empty for those.",
+    {
+      activity_id: z.number().int().describe("The Strava activity ID"),
+    },
+    async ({ activity_id }) => {
+      try {
+        const summary = await fetchActivitySummary(client, streamCache, activity_id);
+        const efforts = (summary["best_efforts"] as unknown[]) ?? [];
+        return ok({
+          activity_id,
+          sport_type: summary.sport_type ?? summary.type,
+          start_date_local: summary.start_date_local,
+          best_efforts: efforts,
+        });
       } catch (err) {
         return handleStravaError(err);
       }

@@ -14,6 +14,11 @@ export interface StreamsParams {
   sportType?: string;
   units?: StreamsUnitsMode;
   laps?: ActivityLap[];
+  // Inclusive elapsed-second range. Both endpoints optional; omitted means
+  // unbounded on that side.
+  timeRangeSeconds?: { start?: number; end?: number };
+  // Inclusive distance range in metres along the distance stream.
+  distanceRangeMeters?: { start?: number; end?: number };
 }
 
 // Anything below this in m/s (~ 22:13 / km) is treated as stopped for the
@@ -97,6 +102,14 @@ interface GapLocation {
 
 interface StreamsMetadata {
   original_size: number;
+  // Number of samples after slicing but before downsampling.
+  sliced_size: number;
+  // Resolved [startIndex, endIndex] applied (inclusive) into the raw stream.
+  // Null when no slice was applied (whole-activity request).
+  sliced_index_range: [number, number] | null;
+  // Echo of the resolved time / distance bounds in their respective units.
+  sliced_time_seconds: { start: number; end: number } | null;
+  sliced_distance_meters: { start: number; end: number } | null;
   resolution_returned: string;
   downsampled_to_seconds: number | null;
   requested_types: StreamType[];
@@ -138,6 +151,8 @@ export async function fetchActivityStreams(
     sportType,
     units = "auto",
     laps,
+    timeRangeSeconds,
+    distanceRangeMeters,
   } = params;
 
   const effectiveStreamTypes = streamTypes ?? defaultsForSport(sportType);
@@ -176,14 +191,26 @@ export async function fetchActivityStreams(
   const timeStream = rawStreams["time"];
   const originalSize = timeStream?.data?.length ?? 0;
 
-  const { gapCount, gapLocations } = detectGaps(timeStream?.data as number[] | undefined);
+  // Resolve slice indices BEFORE gap detection / downsampling so that
+  // detection and any later derivation only see the requested window. The
+  // underlying rawStreams (and cache) are unchanged — sliceStreams returns a
+  // new map of windowed arrays.
+  const slice = computeSliceIndices(rawStreams, timeRangeSeconds, distanceRangeMeters, originalSize);
+  const slicedRawStreams =
+    slice.applied && originalSize > 0
+      ? sliceStreams(rawStreams, presentInPayload, slice.start, slice.end)
+      : rawStreams;
+  const slicedTimeStream = slicedRawStreams["time"];
+  const slicedSize = slicedTimeStream?.data?.length ?? originalSize;
+
+  const { gapCount, gapLocations } = detectGaps(slicedTimeStream?.data as number[] | undefined);
 
   let outputData: Record<string, (number | number[] | boolean | null)[]>;
-  if (downsampleToSeconds && downsampleToSeconds > 1 && timeStream) {
-    outputData = downsample(rawStreams, returnedTypes, downsampleToSeconds);
+  if (downsampleToSeconds && downsampleToSeconds > 1 && slicedTimeStream) {
+    outputData = downsample(slicedRawStreams, returnedTypes, downsampleToSeconds);
   } else {
     outputData = Object.fromEntries(
-      returnedTypes.map((t) => [t, rawStreams[t].data as (number | number[] | boolean | null)[]])
+      returnedTypes.map((t) => [t, slicedRawStreams[t].data as (number | number[] | boolean | null)[]])
     );
   }
 
@@ -214,8 +241,26 @@ export async function fetchActivityStreams(
     }
   }
 
+  const sliceTimeBounds = slice.applied
+    ? {
+        start: (timeStream?.data?.[slice.start] as number | undefined) ?? slice.start,
+        end: (timeStream?.data?.[slice.end] as number | undefined) ?? slice.end,
+      }
+    : null;
+  const distanceStream = rawStreams["distance"];
+  const sliceDistanceBounds = slice.applied && distanceStream
+    ? {
+        start: (distanceStream.data[slice.start] as number | undefined) ?? 0,
+        end: (distanceStream.data[slice.end] as number | undefined) ?? 0,
+      }
+    : null;
+
   const metadata: StreamsMetadata = {
     original_size: originalSize,
+    sliced_size: slicedSize,
+    sliced_index_range: slice.applied ? [slice.start, slice.end] : null,
+    sliced_time_seconds: sliceTimeBounds,
+    sliced_distance_meters: sliceDistanceBounds,
     resolution_returned: resolutionReturned,
     downsampled_to_seconds: downsampleToSeconds ?? null,
     requested_types: requestedTypes,
@@ -244,6 +289,90 @@ export async function fetchActivityStreams(
   }
 
   return { metadata, data: outputData };
+}
+
+// Resolves a [startIndex, endIndex] window into the raw stream from optional
+// time-second bounds, distance-metre bounds, or both. Falls back to the full
+// stream when nothing is requested. When both ranges are given, we take the
+// intersection (the tightest window). Inclusive on both ends.
+function computeSliceIndices(
+  rawStreams: Record<string, RawStream>,
+  timeRange: { start?: number; end?: number } | undefined,
+  distanceRange: { start?: number; end?: number } | undefined,
+  totalSize: number
+): { start: number; end: number; applied: boolean } {
+  if (totalSize === 0 || (!timeRange && !distanceRange)) {
+    return { start: 0, end: totalSize - 1, applied: false };
+  }
+  let start = 0;
+  let end = totalSize - 1;
+
+  const timeData = rawStreams["time"]?.data as number[] | undefined;
+  if (timeRange && timeData && timeData.length > 0) {
+    if (timeRange.start !== undefined) {
+      const found = lowerBound(timeData, timeRange.start);
+      if (found > start) start = found;
+    }
+    if (timeRange.end !== undefined) {
+      const found = upperBound(timeData, timeRange.end);
+      if (found < end) end = found;
+    }
+  }
+
+  const distanceData = rawStreams["distance"]?.data as number[] | undefined;
+  if (distanceRange && distanceData && distanceData.length > 0) {
+    if (distanceRange.start !== undefined) {
+      const found = lowerBound(distanceData, distanceRange.start);
+      if (found > start) start = found;
+    }
+    if (distanceRange.end !== undefined) {
+      const found = upperBound(distanceData, distanceRange.end);
+      if (found < end) end = found;
+    }
+  }
+
+  if (end < start) {
+    // Empty window — pin to a 1-sample slice to avoid empty arrays.
+    end = start;
+  }
+
+  return { start, end, applied: true };
+}
+
+// First index where data[i] >= target. Linear scan; streams are at most a
+// few thousand points so this is fine and avoids assuming monotonicity at
+// the binary-search level (gaps are common).
+function lowerBound(data: number[], target: number): number {
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] >= target) return i;
+  }
+  return data.length - 1;
+}
+
+// Last index where data[i] <= target.
+function upperBound(data: number[], target: number): number {
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i] <= target) return i;
+  }
+  return 0;
+}
+
+function sliceStreams(
+  rawStreams: Record<string, RawStream>,
+  types: StreamType[],
+  start: number,
+  end: number
+): Record<string, RawStream> {
+  const out: Record<string, RawStream> = {};
+  for (const t of types) {
+    const stream = rawStreams[t];
+    if (!stream) continue;
+    out[t] = {
+      ...stream,
+      data: stream.data.slice(start, end + 1),
+    };
+  }
+  return out;
 }
 
 // Builds an array, the same length as `time`, where each element is the

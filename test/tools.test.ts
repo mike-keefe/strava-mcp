@@ -515,6 +515,38 @@ describe("get_activity_laps", () => {
   });
 });
 
+describe("get_activity_best_efforts", () => {
+  it("returns Strava's best_efforts list for a Run", async () => {
+    const summary = {
+      id: 1,
+      sport_type: "Run",
+      start_date_local: "2025-04-01T08:00:00Z",
+      best_efforts: [
+        { name: "5k", distance: 5000, moving_time: 1200, pr_rank: 2 },
+        { name: "10k", distance: 10000, moving_time: 2500, pr_rank: null },
+      ],
+    };
+    const h = await createHarness([["/activities/1", summary]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_activity_best_efforts", arguments: { activity_id: 1 } })
+    ) as { sport_type: string; best_efforts: Array<{ name: string }> };
+    expect(data.sport_type).toBe("Run");
+    expect(data.best_efforts).toHaveLength(2);
+    expect(data.best_efforts[0].name).toBe("5k");
+  });
+
+  it("returns an empty list for activities without best_efforts (e.g. Rides)", async () => {
+    const summary = { id: 2, sport_type: "Ride", start_date_local: "2025-04-02T07:00:00Z" };
+    const h = await createHarness([["/activities/2", summary]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_activity_best_efforts", arguments: { activity_id: 2 } })
+    ) as { best_efforts: unknown[] };
+    expect(data.best_efforts).toEqual([]);
+  });
+});
+
 describe("health (D2)", () => {
   it("returns expected shape on a fresh deploy (no cached athlete, no rate-limit history)", async () => {
     const h = await createHarness([

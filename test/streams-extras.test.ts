@@ -186,6 +186,107 @@ describe("computeLapIndex", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Stream windowing — time_range and distance_range
+// ---------------------------------------------------------------------------
+
+describe("fetchActivityStreams with time/distance windowing", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function streams20s() {
+    const time = Array.from({ length: 20 }, (_, i) => i);
+    const distance = time.map((t) => t * 5); // 5 m/s
+    const heartrate = time.map((t) => 130 + t);
+    return [
+      { type: "time", data: time, series_type: "time", original_size: 20, resolution: "high" },
+      { type: "distance", data: distance, series_type: "time", original_size: 20, resolution: "high" },
+      { type: "heartrate", data: heartrate, series_type: "time", original_size: 20, resolution: "high" },
+    ];
+  }
+
+  it("slices by time_range_seconds inclusively on both ends", async () => {
+    const client = makeClient(streams20s());
+    const kv = makeKv();
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time", "heartrate"],
+      timeRangeSeconds: { start: 5, end: 9 },
+    });
+    const data = result.data as Record<string, unknown[]>;
+    expect(data.time).toEqual([5, 6, 7, 8, 9]);
+    expect(data.heartrate).toEqual([135, 136, 137, 138, 139]);
+    expect(result.metadata.original_size).toBe(20);
+    expect(result.metadata.sliced_size).toBe(5);
+    expect(result.metadata.sliced_index_range).toEqual([5, 9]);
+    expect(result.metadata.sliced_time_seconds).toEqual({ start: 5, end: 9 });
+  });
+
+  it("slices by distance_range_meters", async () => {
+    const client = makeClient(streams20s());
+    const kv = makeKv();
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time", "distance"],
+      distanceRangeMeters: { start: 25, end: 50 },
+    });
+    const data = result.data as Record<string, unknown[]>;
+    // distance 25..50 corresponds to indices 5..10 (distance = i*5)
+    expect(data.distance).toEqual([25, 30, 35, 40, 45, 50]);
+    expect(result.metadata.sliced_distance_meters).toEqual({ start: 25, end: 50 });
+  });
+
+  it("intersects time and distance ranges (tightest window wins)", async () => {
+    const client = makeClient(streams20s());
+    const kv = makeKv();
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time"],
+      timeRangeSeconds: { start: 5 },
+      distanceRangeMeters: { end: 50 }, // index 10
+    });
+    const data = result.data as Record<string, unknown[]>;
+    expect(data.time).toEqual([5, 6, 7, 8, 9, 10]);
+  });
+
+  it("treats omitted bounds as unbounded on that side", async () => {
+    const client = makeClient(streams20s());
+    const kv = makeKv();
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time"],
+      timeRangeSeconds: { start: 18 }, // open-ended end
+    });
+    const data = result.data as Record<string, unknown[]>;
+    expect(data.time).toEqual([18, 19]);
+  });
+
+  it("downsampling operates on the sliced window, not the whole activity", async () => {
+    const client = makeClient(streams20s());
+    const kv = makeKv();
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time", "heartrate"],
+      timeRangeSeconds: { start: 0, end: 9 },
+      downsampleToSeconds: 5,
+    });
+    const data = result.data as Record<string, unknown[]>;
+    // Two buckets within the window: 0-4 and 5-9
+    expect(data.time).toHaveLength(2);
+  });
+
+  it("reports null slice metadata when no window was requested", async () => {
+    const client = makeClient(streams20s());
+    const kv = makeKv();
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time"],
+    });
+    expect(result.metadata.sliced_index_range).toBeNull();
+    expect(result.metadata.sliced_time_seconds).toBeNull();
+    expect(result.metadata.sliced_distance_meters).toBeNull();
+  });
+});
+
 describe("fetchActivityStreams with laps", () => {
   afterEach(() => vi.restoreAllMocks());
 
