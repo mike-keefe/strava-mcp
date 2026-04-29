@@ -8,7 +8,7 @@ export function assertOk(res: Response): void {
 }
 
 export type McpErrorCode =
-  | "STRAVA_RATE_LIMIT"
+  | "RATE_LIMITED"
   | "STRAVA_AUTH"
   | "STRAVA_NOT_FOUND"
   | "STRAVA_SERVER_ERROR"
@@ -41,7 +41,7 @@ export function errorResult(
 export function handleStravaError(err: unknown): McpToolResult {
   if (err instanceof StravaApiError) {
     if (err.status === 429) {
-      return errorResult("STRAVA_RATE_LIMIT", err.message, true, err.retryAfterSeconds);
+      return errorResult("RATE_LIMITED", err.message, true, err.retryAfterSeconds);
     }
     if (err.status === 401 || err.status === 403) {
       return errorResult("STRAVA_AUTH", err.message, false);

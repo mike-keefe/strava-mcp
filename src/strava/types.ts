@@ -11,7 +11,7 @@ export type StreamType =
   | "moving"
   | "grade_smooth";
 
-export type StreamResolution = "low" | "medium" | "high" | "all";
+export type StreamResolution = "low" | "medium" | "high";
 
 export interface StravaStream {
   type: StreamType;

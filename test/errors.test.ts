@@ -12,7 +12,7 @@ describe("errorResult", () => {
   });
 
   it("includes retry_after_seconds when provided", () => {
-    const result = errorResult("STRAVA_RATE_LIMIT", "Rate limited", true, 45);
+    const result = errorResult("RATE_LIMITED", "Rate limited", true, 45);
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error.retry_after_seconds).toBe(45);
     expect(parsed.error.retryable).toBe(true);
@@ -26,11 +26,11 @@ describe("errorResult", () => {
 });
 
 describe("handleStravaError", () => {
-  it("maps 429 to STRAVA_RATE_LIMIT with retryable=true", () => {
+  it("maps 429 to RATE_LIMITED with retryable=true", () => {
     const err = new StravaApiError(429, "Rate limit exceeded", true, 30);
     const result = handleStravaError(err);
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.error.code).toBe("STRAVA_RATE_LIMIT");
+    expect(parsed.error.code).toBe("RATE_LIMITED");
     expect(parsed.error.retryable).toBe(true);
     expect(parsed.error.retry_after_seconds).toBe(30);
   });

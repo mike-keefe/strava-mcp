@@ -21,10 +21,13 @@ When you add this as a connector in Claude, it walks you through a standard OAut
 | Tool | What it returns |
 |------|-----------------|
 | `get_athlete_profile` | Name, location, weight, FTP, measurement preference |
-| `get_recent_activities` | Activity list with filters: type, date range, limit (default 30, max 200) |
+| `get_recent_activities` | Activity list with filters: type, date range, limit (default 30, max 200), optional `fields` whitelist for payload reduction. Returns `{activities, count, next_after, next_before}` so paging avoids off-by-one mistakes |
 | `get_activity_details` | Full activity: laps, splits, best efforts, segment efforts, all metadata |
-| `get_activity_streams` | Raw per-second stream data — HR, pace, cadence, altitude, power, etc. |
-| `get_activity_zones` | HR and power zone distribution for an activity |
+| `get_activity_streams` | Per-second stream data with sport-aware defaults, optional pace_per_km / speed_kmh, optional lap_index, and optional time/distance windowing |
+| `get_activity_best_efforts` | Strava's pre-computed best efforts (1k / 1mi / 5k / 10k / half / full) for a Run, with PR ranks |
+| `get_athlete_best_efforts` | Same best efforts at a single distance (e.g. `5k`) across many Runs, sorted fastest-first. Useful for PR-over-time questions |
+| `get_athlete_summary` | Weekly or monthly rollups (count, distance, moving time, elevation, weighted avg HR, avg pace) — far cheaper than fetching the full activity list and aggregating client-side |
+| `get_activity_zones` | HR and power zone distribution, with `seconds_in_zone` summed per zone |
 | `get_activity_laps` | Manually-pressed laps for an activity |
 | `get_athlete_zones` | Your configured HR and power zone thresholds |
 | `get_athlete_stats` | Recent (4 weeks) / YTD / all-time totals by sport |
@@ -35,6 +38,16 @@ When you add this as a connector in Claude, it walks you through a standard OAut
 | `list_routes` | Your saved routes with pagination |
 | `get_route_details` | Full route metadata plus stream data (latlng, distance, altitude) |
 | `list_gear` | Bikes and shoes with mileage |
+| `health` | Diagnostics: athlete identity, last-seen Strava rate limit, cache stats, worker version |
+
+### Notes on streams
+
+- Stream defaults are sport-aware: Runs/Walks/Hikes get `time, distance, heartrate, velocity_smooth, altitude, cadence, grade_smooth`; Rides add `watts`. Override with `stream_types`.
+- `units="auto"` (the default) adds `pace_per_km` (sec/km) for runs and `speed_kmh` for rides alongside `velocity_smooth`. Pause samples come back as `null`, not `Infinity`. Pass `"raw"` to disable derivation.
+- `velocity_smooth` and `grade_smooth` are smoothed by Strava itself — the MCP does not smooth or process them further.
+- `time_range_seconds` and `distance_range_meters` slice the response server-side. The cached payload is always the full activity, so windowed queries are free after the first fetch.
+- `include_lap_index: true` adds a `lap_index` array of the same length as `time`.
+- `downsample_to_seconds` is a transport optimisation only. Per-second fidelity is the default.
 
 ### Design philosophy
 
@@ -156,8 +169,11 @@ scripts/
 ```
 
 **KV namespaces:**
-- `TOKEN_CACHE` — OAuth tokens, Strava access tokens (per-user), registered OAuth clients
-- `STREAM_CACHE` — Cached stream responses (30-day TTL)
+- `TOKEN_CACHE` — OAuth tokens, Strava access tokens (per-user), registered OAuth clients, latest Strava rate-limit snapshot, cached athlete profile for `health`
+- `STREAM_CACHE` — Cached streams (30-day TTL), activity summaries (24h TTL), laps (30-day TTL)
+
+**Logging:**
+- `LOG_LEVEL` env var (debug | info | warn | error, default `info`) controls verbosity. Logs are emitted as single-line JSON to `console.log`, viewable via `wrangler tail` or the Workers Logs UI. Auth tokens and client secrets are redacted before serialisation.
 
 **Auth:**
 - `POST /oauth/register` — Dynamic client registration (RFC 7591)

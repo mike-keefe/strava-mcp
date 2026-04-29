@@ -1,5 +1,6 @@
 import type { Env } from "../types.js";
 import { stravaTokenCacheKey } from "../oauth.js";
+import { Logger, queryKeys } from "./logger.js";
 import type { StravaRateLimitInfo } from "./types.js";
 
 const BASE_URL = "https://www.strava.com/api/v3";
@@ -7,6 +8,11 @@ const TOKEN_URL = "https://www.strava.com/oauth/token";
 const STATIC_TOKEN_KV_KEY = "strava:access_token";
 const TOKEN_EXPIRY_BUFFER_SECONDS = 300;
 const TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60;
+const ERROR_BODY_PREVIEW_CHARS = 500;
+
+// KV key used by D3 to persist the latest Strava rate-limit headers seen.
+// Read by the health tool. No TTL — overwritten on every Strava response.
+export const RATE_LIMIT_KV_KEY = "rate_limit:latest";
 
 interface CachedToken {
   access_token: string;
@@ -30,7 +36,8 @@ export class StravaApiError extends Error {
     public readonly status: number,
     message: string,
     public readonly retryable: boolean = false,
-    public readonly retryAfterSeconds?: number
+    public readonly retryAfterSeconds?: number,
+    public readonly body?: unknown
   ) {
     super(message);
     this.name = "StravaApiError";
@@ -39,13 +46,16 @@ export class StravaApiError extends Error {
 
 export class StravaClient {
   public lastRateLimitInfo: StravaRateLimitInfo | null = null;
+  private readonly logger: Logger;
 
   constructor(
     private readonly env: Env,
     // When set, tokens are looked up per-user from TOKEN_CACHE rather than
     // using the static STRAVA_REFRESH_TOKEN secret.
     private readonly userOAuthToken?: string
-  ) {}
+  ) {
+    this.logger = new Logger(env.LOG_LEVEL);
+  }
 
   async getAccessToken(): Promise<string> {
     if (this.userOAuthToken) {
@@ -143,9 +153,13 @@ export class StravaClient {
     });
 
     if (!response.ok) {
+      const { body } = await readErrorBody(response);
       throw new StravaApiError(
         response.status,
-        `Token refresh failed (${response.status}): ${response.statusText}`
+        `Token refresh failed (${response.status}): ${formatBodyForMessage(body)}`,
+        false,
+        undefined,
+        body
       );
     }
 
@@ -167,6 +181,17 @@ export class StravaClient {
     options: RequestInit | undefined,
     isRetry: boolean
   ): Promise<Response> {
+    const method = (options?.method ?? "GET").toUpperCase();
+    const pathOnly = path.split("?")[0];
+    const startedAt = Date.now();
+
+    this.logger.debug("strava.request", {
+      method,
+      path: pathOnly,
+      query_keys: queryKeys(path),
+      is_retry: isRetry,
+    });
+
     const response = await fetch(`${BASE_URL}${path}`, {
       ...options,
       headers: {
@@ -174,11 +199,27 @@ export class StravaClient {
         Authorization: `Bearer ${token}`,
       },
     });
+    const durationMs = Date.now() - startedAt;
 
     this.lastRateLimitInfo = parseRateLimitHeaders(response.headers);
+    if (this.lastRateLimitInfo) {
+      // Fire-and-forget would risk being cancelled when the handler returns.
+      // The KV write is small and quick; awaiting it adds <10ms.
+      try {
+        await this.env.TOKEN_CACHE.put(
+          RATE_LIMIT_KV_KEY,
+          JSON.stringify({ ...this.lastRateLimitInfo, updated_at: Math.floor(Date.now() / 1000) })
+        );
+      } catch (err) {
+        this.logger.warn("strava.rate_limit_persist_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     if (response.status === 401 && !isRetry) {
       // Clear the cached access token so the next attempt does a fresh refresh
+      this.logger.info("strava.token_refresh_on_401", { method, path: pathOnly });
       const cacheKey = this.userOAuthToken
         ? stravaTokenCacheKey(this.userOAuthToken)
         : STATIC_TOKEN_KV_KEY;
@@ -187,24 +228,83 @@ export class StravaClient {
       return this.doFetch(path, freshToken, options, true);
     }
 
-    if (response.status === 429) {
-      const resetHeader = response.headers.get("X-RateLimit-Reset");
-      const retryAfterSeconds = resetHeader
-        ? Math.max(1, parseInt(resetHeader, 10) - Math.floor(Date.now() / 1000))
-        : 60;
-      throw new StravaApiError(429, "Strava rate limit exceeded", true, retryAfterSeconds);
-    }
+    if (!response.ok) {
+      const { body } = await readErrorBody(response);
 
-    if (response.status >= 500) {
+      this.logger.warn("strava.response", {
+        method,
+        path: pathOnly,
+        status: response.status,
+        duration_ms: durationMs,
+        body,
+      });
+
+      if (response.status === 429) {
+        const resetHeader = response.headers.get("X-RateLimit-Reset");
+        const retryAfterSeconds = resetHeader
+          ? Math.max(1, parseInt(resetHeader, 10) - Math.floor(Date.now() / 1000))
+          : 60;
+        const limitInfo = this.lastRateLimitInfo
+          ? `(usage: ${this.lastRateLimitInfo.shortTermUsage}/${this.lastRateLimitInfo.shortTermLimit} short-term, ${this.lastRateLimitInfo.dailyUsage}/${this.lastRateLimitInfo.dailyLimit} daily)`
+          : "";
+        throw new StravaApiError(
+          429,
+          `Strava rate limit exceeded ${limitInfo}: ${formatBodyForMessage(body)}`.trim(),
+          true,
+          retryAfterSeconds,
+          body
+        );
+      }
+
+      const retryable = response.status >= 500;
       throw new StravaApiError(
         response.status,
-        `Strava server error (${response.status}): ${response.statusText}`,
-        true
+        `Strava API error (${response.status}): ${formatBodyForMessage(body)}`,
+        retryable,
+        undefined,
+        body
       );
     }
 
+    // Success path — log metadata only; bodies only at debug level.
+    const responseFields: Record<string, unknown> = {
+      method,
+      path: pathOnly,
+      status: response.status,
+      duration_ms: durationMs,
+    };
+    if (this.lastRateLimitInfo) {
+      responseFields.rate_limit = this.lastRateLimitInfo;
+    }
+    this.logger.info("strava.response", responseFields);
+
     return response;
   }
+}
+
+// Reads response.text() once and attempts to parse as JSON. Returns the parsed
+// body if JSON parsing succeeds, otherwise the raw text. A response body can
+// only be read once, so callers must not read again after this.
+async function readErrorBody(response: Response): Promise<{ body: unknown }> {
+  let raw: string;
+  try {
+    raw = await response.text();
+  } catch {
+    return { body: null };
+  }
+  if (!raw) return { body: null };
+  try {
+    return { body: JSON.parse(raw) };
+  } catch {
+    return { body: raw };
+  }
+}
+
+function formatBodyForMessage(body: unknown): string {
+  if (body === null || body === undefined) return "(empty body)";
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  if (text.length <= ERROR_BODY_PREVIEW_CHARS) return text;
+  return text.slice(0, ERROR_BODY_PREVIEW_CHARS) + "…";
 }
 
 function parseRateLimitHeaders(headers: Headers): StravaRateLimitInfo | null {
