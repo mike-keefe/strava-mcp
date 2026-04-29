@@ -24,7 +24,14 @@ Your MCP client ─── strava-mcp Worker ─── Strava API ─── Your 
 
 ### Use the hosted instance
 
-Visit **[mike-keefe.github.io/strava-mcp](https://mike-keefe.github.io/strava-mcp)** for connection instructions. No deployment needed — OAuth through Strava, then add the server URL to your MCP client.
+Add the server to your MCP client and authorise via Strava — no account or deployment needed.
+
+**Server URL:** `https://strava-mcp.mikekeefe.workers.dev/mcp`
+
+- **Claude:** Settings → Connectors → Add custom connector → paste the URL → Connect
+- **Cursor / Windsurf / others:** Settings → MCP → Add server → paste the URL
+
+Full step-by-step instructions at **[mike-keefe.github.io/strava-mcp](https://mike-keefe.github.io/strava-mcp)**.
 
 ### Deploy your own
 

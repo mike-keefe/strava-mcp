@@ -277,9 +277,27 @@
   <div class="hero">
     <h2>Your Strava data,<br>ready to query.</h2>
     <p>A read-only MCP server that connects your Strava account to any MCP-compatible assistant — Claude, Cursor, Windsurf, and others. Ask questions about your training data directly in conversation. No data stored. No model training. No sharing.</p>
-    <a class="cta" href="https://github.com/mike-keefe/strava-mcp">View on GitHub</a>
-    <a class="cta-secondary" href="privacy.html">Privacy policy</a>
+    <a class="cta" href="#connect">Connect now</a>
+    <a class="cta-secondary" href="https://github.com/mike-keefe/strava-mcp">GitHub</a>
   </div>
+
+  <section id="connect">
+    <h3>Connect to the hosted instance</h3>
+    <p style="color:#aaa; font-size:0.95rem; margin-bottom:1.5rem;">No account or deployment needed. Authorise via Strava and start querying your data.</p>
+    <div class="steps">
+      <ol>
+        <li><p>Open your MCP client's connector settings. In <strong>Claude</strong>: Settings → Connectors → Add custom connector. In <strong>Cursor</strong>: Settings → MCP → Add server.</p></li>
+        <li><p>Enter the server URL:</p>
+          <div style="background:#1e1e1e; border:1px solid #2a2a2a; border-radius:6px; padding:0.75rem 1rem; font-family:'SF Mono','Fira Code',monospace; font-size:0.88rem; color:#fc4c02; margin-top:0.5rem; word-break:break-all;">https://strava-mcp.mikekeefe.workers.dev/mcp</div>
+        </li>
+        <li><p>Click <strong>Connect</strong>. Your MCP client opens a Strava authorisation page — approve access and you're done.</p></li>
+        <li><p>Test it: ask <em>"what's my latest activity?"</em> or <em>"show me my 5k PR history."</em></p></li>
+      </ol>
+    </div>
+    <div class="privacy-note" style="margin-top:1.5rem;">
+      By connecting, you agree to the <a href="privacy.html">privacy policy</a>. Your tokens are stored per-user in Cloudflare KV and can be revoked at any time from <a href="https://www.strava.com/settings/apps">strava.com/settings/apps</a>.
+    </div>
+  </section>
 
   <div class="diagram">
     <div>Your MCP client <span class="arrow">──OAuth 2.0──▶</span> strava-mcp Worker <span class="arrow">──Strava API──▶</span> Your data</div>
