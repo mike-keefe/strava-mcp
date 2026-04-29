@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { fetchActivityStreams } from "../src/strava/streams.js";
+import { StravaApiError } from "../src/strava/client.js";
 import type { StravaClient } from "../src/strava/client.js";
 
 function makeKv(initial: Record<string, string> = {}): KVNamespace {
@@ -142,6 +143,84 @@ describe("fetchActivityStreams", () => {
     });
     expect(result.metadata.original_size).toBe(n);
     expect((result.data as Record<string, unknown[]>)["time"]).toHaveLength(n);
+  });
+
+  // ---------------------------------------------------------------------------
+  // A1 — retry on 400 with watts and temp removed (Run with no power meter)
+  // ---------------------------------------------------------------------------
+
+  it("retries without watts and temp when Strava returns 400", async () => {
+    const fixture = makeStreams();
+    const client = {
+      fetch: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new StravaApiError(400, "Strava API error (400): bad watts", false, undefined, {
+            errors: [{ resource: "Stream", field: "watts", code: "invalid" }],
+          })
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify(fixture), { status: 200 })
+        ),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+    const kv = makeKv();
+
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 18311335874,
+      streamTypes: ["time", "distance", "heartrate"],
+    });
+
+    expect((client.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
+    const firstCallPath = (client.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    const secondCallPath = (client.fetch as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(firstCallPath).toContain("watts");
+    expect(secondCallPath).not.toContain("watts");
+    expect(secondCallPath).not.toContain("temp");
+    expect(result.metadata.returned_types).toContain("time");
+    expect(result.metadata.unavailable_types).not.toContain("time");
+  });
+
+  it("re-throws the 400 with body when the retry without watts also fails", async () => {
+    const errorBody = {
+      message: "Bad Request",
+      errors: [{ resource: "Activity", field: "id", code: "invalid" }],
+    };
+    const client = {
+      fetch: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new StravaApiError(400, "Strava API error (400): first", false, undefined, errorBody)
+        )
+        .mockRejectedValueOnce(
+          new StravaApiError(400, "Strava API error (400): second", false, undefined, errorBody)
+        ),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+    const kv = makeKv();
+
+    const err = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time"],
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect((err as StravaApiError).status).toBe(400);
+    expect((err as StravaApiError).body).toEqual(errorBody);
+  });
+
+  it("does not catch non-400 errors during the upstream fetch", async () => {
+    const client = {
+      fetch: vi.fn().mockRejectedValue(new StravaApiError(503, "server error", true)),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+    const kv = makeKv();
+
+    const err = await fetchActivityStreams(client, kv, { activityId: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect((err as StravaApiError).status).toBe(503);
+    // No retry should have happened
+    expect((client.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
   });
 
   it("preserves nulls in downsampled output", async () => {

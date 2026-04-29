@@ -7,6 +7,7 @@ const TOKEN_URL = "https://www.strava.com/oauth/token";
 const STATIC_TOKEN_KV_KEY = "strava:access_token";
 const TOKEN_EXPIRY_BUFFER_SECONDS = 300;
 const TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60;
+const ERROR_BODY_PREVIEW_CHARS = 500;
 
 interface CachedToken {
   access_token: string;
@@ -30,7 +31,8 @@ export class StravaApiError extends Error {
     public readonly status: number,
     message: string,
     public readonly retryable: boolean = false,
-    public readonly retryAfterSeconds?: number
+    public readonly retryAfterSeconds?: number,
+    public readonly body?: unknown
   ) {
     super(message);
     this.name = "StravaApiError";
@@ -143,9 +145,13 @@ export class StravaClient {
     });
 
     if (!response.ok) {
+      const { body } = await readErrorBody(response);
       throw new StravaApiError(
         response.status,
-        `Token refresh failed (${response.status}): ${response.statusText}`
+        `Token refresh failed (${response.status}): ${formatBodyForMessage(body)}`,
+        false,
+        undefined,
+        body
       );
     }
 
@@ -187,24 +193,60 @@ export class StravaClient {
       return this.doFetch(path, freshToken, options, true);
     }
 
-    if (response.status === 429) {
-      const resetHeader = response.headers.get("X-RateLimit-Reset");
-      const retryAfterSeconds = resetHeader
-        ? Math.max(1, parseInt(resetHeader, 10) - Math.floor(Date.now() / 1000))
-        : 60;
-      throw new StravaApiError(429, "Strava rate limit exceeded", true, retryAfterSeconds);
-    }
+    if (!response.ok) {
+      const { body } = await readErrorBody(response);
 
-    if (response.status >= 500) {
+      if (response.status === 429) {
+        const resetHeader = response.headers.get("X-RateLimit-Reset");
+        const retryAfterSeconds = resetHeader
+          ? Math.max(1, parseInt(resetHeader, 10) - Math.floor(Date.now() / 1000))
+          : 60;
+        throw new StravaApiError(
+          429,
+          `Strava rate limit exceeded: ${formatBodyForMessage(body)}`,
+          true,
+          retryAfterSeconds,
+          body
+        );
+      }
+
+      const retryable = response.status >= 500;
       throw new StravaApiError(
         response.status,
-        `Strava server error (${response.status}): ${response.statusText}`,
-        true
+        `Strava API error (${response.status}): ${formatBodyForMessage(body)}`,
+        retryable,
+        undefined,
+        body
       );
     }
 
     return response;
   }
+}
+
+// Reads response.text() once and attempts to parse as JSON. Returns the parsed
+// body if JSON parsing succeeds, otherwise the raw text. A response body can
+// only be read once, so callers must not read again after this.
+async function readErrorBody(response: Response): Promise<{ body: unknown }> {
+  let raw: string;
+  try {
+    raw = await response.text();
+  } catch {
+    return { body: null };
+  }
+  if (!raw) return { body: null };
+  try {
+    return { body: JSON.parse(raw) };
+  } catch {
+    return { body: raw };
+  }
+}
+
+function formatBodyForMessage(body: unknown): string {
+  if (body === null || body === undefined) return "(empty body)";
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  if (text.length <= ERROR_BODY_PREVIEW_CHARS) return text;
+  return text.slice(0, ERROR_BODY_PREVIEW_CHARS) + "…";
 }
 
 function parseRateLimitHeaders(headers: Headers): StravaRateLimitInfo | null {

@@ -1,8 +1,9 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StravaApiError } from "./client.js";
 import type { StravaClient } from "./client.js";
 import { handleStravaError, assertOk } from "./errors.js";
-import { fetchActivityStreams } from "./streams.js";
+import { fetchActivityStreams, fetchSegmentEffortStreams } from "./streams.js";
 import type { StreamType } from "./types.js";
 
 function ok(data: unknown): { content: [{ type: "text"; text: string }] } {
@@ -286,21 +287,22 @@ export function registerStravaTools(
     },
     async ({ effort_id, stream_types }) => {
       try {
-        const keys = (stream_types ?? ["time", "distance", "altitude", "latlng"]).join(",");
-        const res = await client.fetch(
-          `/segment_efforts/${effort_id}/streams?keys=${keys}&resolution=all&series_type=time`
+        const requested = (stream_types ?? ["time", "distance", "altitude", "latlng"]) as StreamType[];
+        const { rawStreams, presentTypes } = await fetchSegmentEffortStreams(
+          client,
+          effort_id,
+          requested
         );
-        assertOk(res);
-        const streamsArray = (await res.json()) as { type: string; data: unknown[] }[];
-        const present = streamsArray.map((s) => s.type);
-        const requested = stream_types ?? ["time", "distance", "altitude", "latlng"];
-        const missing = requested.filter((t) => !present.includes(t));
+        const missing = requested.filter((t) => !presentTypes.includes(t));
         return ok({
           metadata: {
-            stream_types_present: present,
+            requested_types: requested,
+            returned_types: presentTypes,
+            unavailable_types: missing,
+            stream_types_present: presentTypes,
             stream_types_missing: missing,
           },
-          data: Object.fromEntries(streamsArray.map((s) => [s.type, s.data])),
+          data: Object.fromEntries(presentTypes.map((t) => [t, rawStreams[t].data])),
         });
       } catch (err) {
         return handleStravaError(err);
@@ -368,15 +370,21 @@ export function registerStravaTools(
     },
     async ({ route_id }) => {
       try {
-        const [routeRes, streamsRes] = await Promise.all([
-          client.fetch(`/routes/${route_id}`),
-          client.fetch(`/routes/${route_id}/streams`),
-        ]);
+        const routeRes = await client.fetch(`/routes/${route_id}`);
         assertOk(routeRes);
         const route = await routeRes.json();
+        // /routes/:id/streams returns a fixed set (latlng, distance, altitude)
+        // and doesn't accept a `keys` parameter, so it shouldn't 400 from
+        // missing keys. It can still 403/404 on routes without stream data —
+        // tolerate that and return the route with null streams.
         let streams: unknown = null;
-        if (streamsRes.ok) {
-          streams = await streamsRes.json();
+        try {
+          const streamsRes = await client.fetch(`/routes/${route_id}/streams`);
+          if (streamsRes.ok) {
+            streams = await streamsRes.json();
+          }
+        } catch (err) {
+          if (!(err instanceof StravaApiError)) throw err;
         }
         return ok({ route, streams });
       } catch (err) {

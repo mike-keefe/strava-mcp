@@ -221,7 +221,7 @@ describe("StravaClient.fetch", () => {
     );
   });
 
-  it("throws on 401 without retrying a second time", async () => {
+  it("throws StravaApiError on 401 after a retry without retrying again", async () => {
     const cachedToken = JSON.stringify({ access_token: "stale-token", expires_at: FUTURE_EXPIRES_AT });
     const kv = makeKv({ "strava:access_token": cachedToken });
     const client = new StravaClient(makeEnv(kv));
@@ -233,9 +233,87 @@ describe("StravaClient.fetch", () => {
 
     vi.stubGlobal("fetch", mockFetch);
 
-    // On second 401 (isRetry=true) the response is returned as-is (not thrown)
-    const response = await client.fetch("/athlete");
-    expect(response.status).toBe(401);
+    const err = await client.fetch("/athlete").catch((e) => e);
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(401);
     expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  // ---------------------------------------------------------------------------
+  // A2 — upstream Strava error bodies are surfaced
+  // ---------------------------------------------------------------------------
+
+  it("includes parsed JSON body on a non-OK response", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    const errorBody = {
+      message: "Bad Request",
+      errors: [{ resource: "Stream", field: "watts", code: "invalid" }],
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(apiResponse(errorBody, 400)));
+
+    const err = await client.fetch("/activities/1/streams").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(400);
+    expect(err.body).toEqual(errorBody);
+    expect(err.message).toContain("watts");
+    expect(err.message).toContain("invalid");
+  });
+
+  it("includes raw text body when response body is not JSON", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("Internal Server Error — html page here", { status: 502 })
+      )
+    );
+
+    const err = await client.fetch("/athlete").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(502);
+    expect(err.body).toBe("Internal Server Error — html page here");
+    expect(err.message).toContain("Internal Server Error");
+  });
+
+  it("does not crash when error body is empty", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 403 })));
+
+    const err = await client.fetch("/athlete").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(403);
+  });
+
+  it("includes parsed body on 429 rate limit responses", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    const resetAt = NOW_SECONDS + 30;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        apiResponse(
+          { message: "Rate Limit Exceeded", errors: [] },
+          429,
+          { "X-RateLimit-Reset": String(resetAt) }
+        )
+      )
+    );
+
+    const err = await client.fetch("/athlete").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(429);
+    expect(err.retryAfterSeconds).toBe(30);
+    expect((err.body as { message: string }).message).toBe("Rate Limit Exceeded");
   });
 });

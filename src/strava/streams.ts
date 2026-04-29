@@ -1,3 +1,4 @@
+import { StravaApiError } from "./client.js";
 import type { StravaClient } from "./client.js";
 import type { StreamType, StreamResolution } from "./types.js";
 
@@ -32,6 +33,15 @@ const ALL_STREAM_TYPES: StreamType[] = [
   "grade_smooth",
 ];
 
+// Streams that are commonly absent on consumer GPS watches. When Strava
+// returns a 400 for the full key list, we retry without these. The activity
+// summary's `device_watts: true` flag is misleading — it indicates *estimated*
+// watts on the summary, not the existence of a per-second watts stream. A
+// 400 is the only signal we get for "this stream type isn't recorded".
+const OPTIONAL_DEVICE_STREAMS: StreamType[] = ["watts", "temp"];
+
+const STREAMS_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
+
 const GAP_THRESHOLD_SECONDS = 5;
 
 interface RawStream {
@@ -52,6 +62,10 @@ interface StreamsMetadata {
   original_size: number;
   resolution_returned: string;
   downsampled_to_seconds: number | null;
+  requested_types: StreamType[];
+  returned_types: StreamType[];
+  unavailable_types: StreamType[];
+  // Legacy fields kept for backwards compat with existing consumers.
   stream_types_present: StreamType[];
   stream_types_missing: StreamType[];
   gap_count: number;
@@ -64,6 +78,11 @@ type RowsFormat = Record<string, number | number[] | boolean | null>[];
 export interface StreamsResult {
   metadata: StreamsMetadata;
   data: ArraysFormat | RowsFormat;
+}
+
+interface CachedStreams {
+  rawStreams: Record<string, RawStream>;
+  presentTypes: StreamType[];
 }
 
 export async function fetchActivityStreams(
@@ -83,45 +102,45 @@ export async function fetchActivityStreams(
     ALL_STREAM_TYPES.includes(t)
   );
 
-  // Fetch raw streams — cache by activity ID (activities are immutable)
+  // Per-activity cache (activities are immutable). The cached payload always
+  // contains the full safe stream set Strava actually returned; we filter to
+  // the user's requested types on the way out.
   const cacheKey = `streams:${activityId}:all`;
-  let rawStreams: Record<string, RawStream>;
+  const cached = await readCachedStreams(streamCache, cacheKey);
 
-  const cached = await streamCache.get(cacheKey);
+  let rawStreams: Record<string, RawStream>;
+  let presentInPayload: StreamType[];
+
   if (cached) {
-    rawStreams = JSON.parse(cached) as Record<string, RawStream>;
+    rawStreams = cached.rawStreams;
+    presentInPayload = cached.presentTypes;
   } else {
-    const keys = ALL_STREAM_TYPES.join(",");
-    const query = `?keys=${keys}&resolution=all&series_type=time`;
-    const response = await client.fetch(`/activities/${activityId}/streams${query}`);
-    if (!response.ok) {
-      throw Object.assign(new Error(`Strava API error: ${response.status}`), {
-        status: response.status,
-      });
-    }
-    const streamsArray = (await response.json()) as RawStream[];
-    rawStreams = Object.fromEntries(streamsArray.map((s) => [s.type, s]));
-    await streamCache.put(cacheKey, JSON.stringify(rawStreams), {
-      expirationTtl: 30 * 24 * 60 * 60,
+    const fetched = await fetchAllStreamsWithRetry(client, activityId);
+    rawStreams = fetched.rawStreams;
+    presentInPayload = fetched.presentTypes;
+
+    const cacheValue: CachedStreams = { rawStreams, presentTypes: presentInPayload };
+    await streamCache.put(cacheKey, JSON.stringify(cacheValue), {
+      expirationTtl: STREAMS_CACHE_TTL_SECONDS,
     });
   }
 
-  const presentTypes = requestedTypes.filter((t) => rawStreams[t] !== undefined);
-  const missingTypes = requestedTypes.filter((t) => rawStreams[t] === undefined);
+  // Anything the user asked for that isn't in the cached payload is
+  // unavailable upstream — surface it in metadata, do not re-fetch.
+  const returnedTypes = requestedTypes.filter((t) => rawStreams[t] !== undefined);
+  const unavailableTypes = requestedTypes.filter((t) => rawStreams[t] === undefined);
 
   const timeStream = rawStreams["time"];
   const originalSize = timeStream?.data?.length ?? 0;
 
-  // Detect gaps in the time stream
   const { gapCount, gapLocations } = detectGaps(timeStream?.data as number[] | undefined);
 
-  // Downsample if requested
   let outputData: Record<string, (number | number[] | boolean | null)[]>;
   if (downsampleToSeconds && downsampleToSeconds > 1 && timeStream) {
-    outputData = downsample(rawStreams, presentTypes, downsampleToSeconds);
+    outputData = downsample(rawStreams, returnedTypes, downsampleToSeconds);
   } else {
     outputData = Object.fromEntries(
-      presentTypes.map((t) => [t, rawStreams[t].data as (number | number[] | boolean | null)[]])
+      returnedTypes.map((t) => [t, rawStreams[t].data as (number | number[] | boolean | null)[]])
     );
   }
 
@@ -132,18 +151,21 @@ export async function fetchActivityStreams(
     original_size: originalSize,
     resolution_returned: resolutionReturned,
     downsampled_to_seconds: downsampleToSeconds ?? null,
-    stream_types_present: presentTypes,
-    stream_types_missing: missingTypes,
+    requested_types: requestedTypes,
+    returned_types: returnedTypes,
+    unavailable_types: unavailableTypes,
+    stream_types_present: returnedTypes,
+    stream_types_missing: unavailableTypes,
     gap_count: gapCount,
     gap_locations: gapLocations,
   };
 
   if (format === "rows") {
-    const length = outputData["time"]?.length ?? outputData[presentTypes[0]]?.length ?? 0;
+    const length = outputData["time"]?.length ?? outputData[returnedTypes[0]]?.length ?? 0;
     const rows: RowsFormat = [];
     for (let i = 0; i < length; i++) {
       const row: Record<string, number | number[] | boolean | null> = {};
-      for (const t of presentTypes) {
+      for (const t of returnedTypes) {
         row[t] = (outputData[t]?.[i] ?? null) as number | number[] | boolean | null;
       }
       rows.push(row);
@@ -152,6 +174,107 @@ export async function fetchActivityStreams(
   }
 
   return { metadata, data: outputData };
+}
+
+// Reads the streams cache, tolerating both the new {rawStreams, presentTypes}
+// shape and legacy entries that stored only the rawStreams map directly.
+async function readCachedStreams(
+  streamCache: KVNamespace,
+  cacheKey: string
+): Promise<CachedStreams | null> {
+  const raw = await streamCache.get(cacheKey);
+  if (!raw) return null;
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    "rawStreams" in parsed &&
+    "presentTypes" in parsed
+  ) {
+    const c = parsed as CachedStreams;
+    return { rawStreams: c.rawStreams, presentTypes: c.presentTypes };
+  }
+  // Legacy entry — derive presentTypes from the keys.
+  const legacy = parsed as Record<string, RawStream>;
+  return {
+    rawStreams: legacy,
+    presentTypes: Object.keys(legacy) as StreamType[],
+  };
+}
+
+// Fetches the full stream set from Strava, retrying once on 400 with watts
+// and temp removed (these are commonly absent on GPS watches without a power
+// meter or thermometer).
+async function fetchAllStreamsWithRetry(
+  client: StravaClient,
+  activityId: number
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  try {
+    return await fetchStreamsForKeys(client, activityId, ALL_STREAM_TYPES);
+  } catch (err) {
+    if (!(err instanceof StravaApiError) || err.status !== 400) {
+      throw err;
+    }
+    const safeKeys = ALL_STREAM_TYPES.filter((k) => !OPTIONAL_DEVICE_STREAMS.includes(k));
+    return fetchStreamsForKeys(client, activityId, safeKeys);
+  }
+}
+
+async function fetchStreamsForKeys(
+  client: StravaClient,
+  activityId: number,
+  keys: StreamType[]
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  const query = `?keys=${keys.join(",")}&resolution=all&series_type=time`;
+  const response = await client.fetch(`/activities/${activityId}/streams${query}`);
+  const streamsArray = (await response.json()) as RawStream[];
+  const rawStreams = Object.fromEntries(streamsArray.map((s) => [s.type, s]));
+  return {
+    rawStreams,
+    presentTypes: Object.keys(rawStreams) as StreamType[],
+  };
+}
+
+// Fetches segment effort streams. Strava's `/segment_efforts/:id/streams`
+// endpoint accepts a `keys` parameter and, like activities, returns 400 if
+// any requested key isn't recorded for that effort. We retry once with watts
+// and temp removed.
+export async function fetchSegmentEffortStreams(
+  client: StravaClient,
+  effortId: number,
+  keys: StreamType[]
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  try {
+    return await fetchEffortStreamsForKeys(client, effortId, keys);
+  } catch (err) {
+    if (!(err instanceof StravaApiError) || err.status !== 400) {
+      throw err;
+    }
+    const requestedOptionalKeys = keys.filter((k) => OPTIONAL_DEVICE_STREAMS.includes(k));
+    if (requestedOptionalKeys.length === 0) {
+      throw err;
+    }
+    const safeKeys = keys.filter((k) => !OPTIONAL_DEVICE_STREAMS.includes(k));
+    if (safeKeys.length === 0) {
+      throw err;
+    }
+    return fetchEffortStreamsForKeys(client, effortId, safeKeys);
+  }
+}
+
+async function fetchEffortStreamsForKeys(
+  client: StravaClient,
+  effortId: number,
+  keys: StreamType[]
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  const query = `?keys=${keys.join(",")}&resolution=all&series_type=time`;
+  const response = await client.fetch(`/segment_efforts/${effortId}/streams${query}`);
+  const json = (await response.json()) as RawStream[];
+  const rawStreams = Object.fromEntries(json.map((s) => [s.type, s]));
+  return {
+    rawStreams,
+    presentTypes: Object.keys(rawStreams) as StreamType[],
+  };
 }
 
 function detectGaps(
