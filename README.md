@@ -21,10 +21,12 @@ When you add this as a connector in Claude, it walks you through a standard OAut
 | Tool | What it returns |
 |------|-----------------|
 | `get_athlete_profile` | Name, location, weight, FTP, measurement preference |
-| `get_recent_activities` | Activity list with filters: type, date range, limit (default 30, max 200) |
+| `get_recent_activities` | Activity list with filters: type, date range, limit (default 30, max 200), optional `fields` whitelist for payload reduction. Returns `{activities, count, next_after, next_before}` so paging avoids off-by-one mistakes |
 | `get_activity_details` | Full activity: laps, splits, best efforts, segment efforts, all metadata |
 | `get_activity_streams` | Per-second stream data with sport-aware defaults, optional pace_per_km / speed_kmh, optional lap_index, and optional time/distance windowing |
 | `get_activity_best_efforts` | Strava's pre-computed best efforts (1k / 1mi / 5k / 10k / half / full) for a Run, with PR ranks |
+| `get_athlete_best_efforts` | Same best efforts at a single distance (e.g. `5k`) across many Runs, sorted fastest-first. Useful for PR-over-time questions |
+| `get_athlete_summary` | Weekly or monthly rollups (count, distance, moving time, elevation, weighted avg HR, avg pace) — far cheaper than fetching the full activity list and aggregating client-side |
 | `get_activity_zones` | HR and power zone distribution, with `seconds_in_zone` summed per zone |
 | `get_activity_laps` | Manually-pressed laps for an activity |
 | `get_athlete_zones` | Your configured HR and power zone thresholds |

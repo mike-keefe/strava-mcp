@@ -5,6 +5,7 @@ import type { StravaClient } from "./client.js";
 import { handleStravaError, assertOk } from "./errors.js";
 import { fetchActivityStreams, fetchSegmentEffortStreams } from "./streams.js";
 import { fetchActivitySummary, fetchActivityLaps } from "./activity.js";
+import { buildAthleteSummary } from "./summary.js";
 import type { StreamType } from "./types.js";
 import type { Env } from "../types.js";
 
@@ -23,6 +24,71 @@ function ok(data: unknown): { content: [{ type: "text"; text: string }] } {
 
 const MAX_FILTER_PAGES = 10;
 const FILTER_PAGE_SIZE = 200;
+
+// Activities, when projected with a `fields` filter, lose all type info.
+// We only need start_date for cursor computation, so this is the minimum
+// shape we depend on.
+type ActivitySummaryRow = Record<string, unknown> & { start_date?: string };
+
+async function fetchUnfilteredActivities(
+  client: Pick<StravaClient, "fetch">,
+  limit: number,
+  before: number | undefined,
+  after: number | undefined
+): Promise<ActivitySummaryRow[]> {
+  const activities: ActivitySummaryRow[] = [];
+  let page = 1;
+  while (activities.length < limit) {
+    const perPage = Math.min(200, limit - activities.length);
+    const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+    if (before) params.set("before", String(before));
+    if (after) params.set("after", String(after));
+    const res = await client.fetch(`/athlete/activities?${params}`);
+    assertOk(res);
+    const pageData = (await res.json()) as ActivitySummaryRow[];
+    if (pageData.length === 0) break;
+    activities.push(...pageData);
+    if (pageData.length < perPage) break;
+    page++;
+  }
+  return activities.slice(0, limit);
+}
+
+function projectFields(
+  activities: ActivitySummaryRow[],
+  fields: string[] | undefined
+): Array<Record<string, unknown>> {
+  if (!fields || fields.length === 0) return activities;
+  const set = new Set(fields);
+  return activities.map((a) => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(a)) {
+      if (set.has(k)) out[k] = a[k];
+    }
+    return out;
+  });
+}
+
+// Walks the (newest-first) activities list to find the activity with the
+// newest or oldest start_date and returns its epoch seconds for cursor use.
+// Strava's `before` / `after` filters are exclusive, so passing this value
+// directly back will skip the boundary activity rather than duplicating it.
+function cursorEpoch(activities: ActivitySummaryRow[], which: "newest" | "oldest"): number | null {
+  if (activities.length === 0) return null;
+  let extreme: number | null = null;
+  for (const a of activities) {
+    if (typeof a.start_date !== "string") continue;
+    const t = new Date(a.start_date).getTime();
+    if (Number.isNaN(t)) continue;
+    const epoch = Math.floor(t / 1000);
+    if (extreme === null) {
+      extreme = epoch;
+    } else if (which === "newest" ? epoch > extreme : epoch < extreme) {
+      extreme = epoch;
+    }
+  }
+  return extreme;
+}
 
 // Exported for unit testing. Paginates /athlete/activities in fixed-size pages
 // and accumulates activities matching activityType until limit is reached or
@@ -85,37 +151,40 @@ export function registerStravaTools(
   // Issue #4 — get_recent_activities
   server.tool(
     "get_recent_activities",
-    "Lists the athlete's activities. Filters: limit (default 30, max 200), before/after (epoch seconds), activity_type (e.g. 'Run').",
+    "Lists the athlete's activities. Filters: limit (default 30, max 200), before/after (epoch seconds), activity_type (e.g. 'Run'). Returns {activities, count, next_after, next_before}: pass next_before back as `before` to page older, or next_after as `after` to fetch newer activities later. Optional `fields` projects each activity to a subset (huge payload reduction).",
     {
       limit: z.number().int().min(1).max(200).default(30).describe("Max activities to return"),
-      before: z.number().int().optional().describe("Only return activities before this epoch timestamp"),
-      after: z.number().int().optional().describe("Only return activities after this epoch timestamp"),
+      before: z.number().int().optional().describe("Only return activities before this epoch timestamp (exclusive — Strava semantics)"),
+      after: z.number().int().optional().describe("Only return activities after this epoch timestamp (exclusive — Strava semantics)"),
       activity_type: z.string().optional().describe("Filter by type, e.g. 'Run', 'Ride'"),
+      fields: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Optional whitelist of activity fields to keep (e.g. ['id','name','start_date','distance','moving_time','average_heartrate']). Reduces payload by ~70-80%. Omit to return the full activity object."
+        ),
     },
-    async ({ limit, before, after, activity_type }) => {
+    async ({ limit, before, after, activity_type, fields }) => {
       try {
+        let activities: ActivitySummaryRow[];
         if (activity_type) {
-          return ok(
-            await fetchFilteredActivities(client, limit, activity_type, before, after)
-          );
+          activities = (await fetchFilteredActivities(
+            client,
+            limit,
+            activity_type,
+            before,
+            after
+          )) as ActivitySummaryRow[];
+        } else {
+          activities = await fetchUnfilteredActivities(client, limit, before, after);
         }
-        // Unfiltered path — unchanged: page with per_page=limit to minimise API calls
-        const activities: unknown[] = [];
-        let page = 1;
-        while (activities.length < limit) {
-          const perPage = Math.min(200, limit - activities.length);
-          const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
-          if (before) params.set("before", String(before));
-          if (after) params.set("after", String(after));
-          const res = await client.fetch(`/athlete/activities?${params}`);
-          assertOk(res);
-          const page_data = (await res.json()) as unknown[];
-          if (page_data.length === 0) break;
-          activities.push(...page_data);
-          if (page_data.length < perPage) break;
-          page++;
-        }
-        return ok(activities.slice(0, limit));
+        const projected = projectFields(activities, fields);
+        return ok({
+          activities: projected,
+          count: projected.length,
+          next_after: cursorEpoch(activities, "newest"),
+          next_before: cursorEpoch(activities, "oldest"),
+        });
       } catch (err) {
         return handleStravaError(err);
       }
@@ -143,7 +212,7 @@ export function registerStravaTools(
   // Issue #6 — get_activity_streams
   server.tool(
     "get_activity_streams",
-    "Raw per-second stream data for an activity. Returns time, distance, HR, pace, cadence, altitude, and more at full resolution. Thin pass-through — no smoothing or outlier removal.",
+    "Raw per-second stream data for an activity. Returns time, distance, HR, velocity, cadence, altitude, and more at full resolution. The MCP applies no smoothing or outlier removal — it's a thin pass-through. NOTE: velocity_smooth and grade_smooth are smoothed by Strava itself before they reach the API; that smoothing is opaque and out of this server's control. If you want the raw GPS-derived velocity, no Strava endpoint exposes it.",
     {
       activity_id: z.number().int().describe("The Strava activity ID"),
       stream_types: z
@@ -302,6 +371,38 @@ export function registerStravaTools(
         const statsRes = await client.fetch(`/athletes/${athlete.id}/stats`);
         assertOk(statsRes);
         return ok(await statsRes.json());
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // get_athlete_summary — weekly or monthly rollups across many activities,
+  // returned as a single small payload. Recommended starting point for
+  // trend questions ("how have my weekly volumes changed", "which months
+  // have my best average pace"). Hard-capped at ~2000 activities per call;
+  // narrow with `after` / `before` for longer histories.
+  server.tool(
+    "get_athlete_summary",
+    "Aggregated rollups (count, distance, moving time, elevation, weighted avg HR, avg pace) bucketed by week or month. Pure arithmetic over Strava activity-summary fields — no smoothing, no opinions. Far cheaper than fetching the full activity list and aggregating client-side. Capped at ~2000 activities per call; narrow with after/before for longer windows.",
+    {
+      after: z.number().int().optional().describe("Epoch seconds — activities on or after this time"),
+      before: z.number().int().optional().describe("Epoch seconds — activities before this time"),
+      activity_type: z.string().optional().describe("Filter by sport_type/type, e.g. 'Run' or 'Ride'"),
+      granularity: z
+        .enum(["week", "month"])
+        .default("month")
+        .describe("Bucket size. 'week' is Monday-start ISO weeks; 'month' is calendar month."),
+    },
+    async ({ after, before, activity_type, granularity }) => {
+      try {
+        const summary = await buildAthleteSummary(client, {
+          after,
+          before,
+          activityType: activity_type,
+          granularity,
+        });
+        return ok(summary);
       } catch (err) {
         return handleStravaError(err);
       }
@@ -509,6 +610,44 @@ export function registerStravaTools(
     }
   );
 
+  // get_athlete_best_efforts — scans Run activities in the window and pulls
+  // out Strava's best_efforts entries for a single distance ("5k", "10k",
+  // etc). Useful for PR-trend-over-time questions. Caches the per-activity
+  // detail so a follow-up query in a different window is cheap.
+  server.tool(
+    "get_athlete_best_efforts",
+    "Strava-computed best efforts for a single distance ('1k' | '1 mile' | '5k' | '10k' | 'Half-Marathon' | 'Marathon') across many Run activities. Returns a list sorted fastest-first. Hits each Run's detail endpoint, so it can issue many Strava calls — use after/before to keep the window narrow.",
+    {
+      distance: z
+        .string()
+        .describe(
+          "Strava best-effort name to filter on, e.g. '5k', '10k', 'Half-Marathon'. Match is case-insensitive and exact on Strava's name field."
+        ),
+      after: z.number().int().optional().describe("Epoch seconds — activities on or after this time"),
+      before: z.number().int().optional().describe("Epoch seconds — activities before this time"),
+      max_activities: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .default(200)
+        .describe("Cap on Run activities scanned. Defaults to 200 to bound Strava API hits."),
+    },
+    async ({ distance, after, before, max_activities }) => {
+      try {
+        const result = await collectAthleteBestEfforts(client, streamCache, {
+          distance,
+          after,
+          before,
+          maxActivities: max_activities,
+        });
+        return ok(result);
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
   // get_activity_best_efforts — projects the Strava-computed best_efforts
   // array off the activity detail. Strava already calculates 1k / 1mi / 5k /
   // 10k / half / full PRs for every Run; this tool returns just that subset
@@ -609,6 +748,83 @@ async function readLatestRateLimit(tokenCache: KVNamespace): Promise<HealthRateL
   } catch {
     return null;
   }
+}
+
+interface BestEffortRow {
+  activity_id: number;
+  activity_name?: string;
+  start_date_local?: string;
+  name: string;
+  distance: number;
+  moving_time: number;
+  elapsed_time: number;
+  pr_rank: number | null;
+  is_kom: boolean;
+  effort_id?: number;
+}
+
+async function collectAthleteBestEfforts(
+  client: StravaClient,
+  streamCache: KVNamespace,
+  opts: {
+    distance: string;
+    after?: number;
+    before?: number;
+    maxActivities: number;
+  }
+): Promise<{
+  distance: string;
+  results: BestEffortRow[];
+  activities_scanned: number;
+  activities_with_best_efforts: number;
+}> {
+  // 1. Page through /athlete/activities filtering to Run.
+  const runs = (await fetchFilteredActivities(
+    client,
+    opts.maxActivities,
+    "Run",
+    opts.before,
+    opts.after
+  )) as Array<{ id: number }>;
+
+  // 2. For each Run, hit /activities/{id} (cached) and pluck best_efforts.
+  const target = opts.distance.toLowerCase();
+  const results: BestEffortRow[] = [];
+  let withBest = 0;
+  for (const r of runs) {
+    let detail;
+    try {
+      detail = await fetchActivitySummary(client, streamCache, r.id);
+    } catch {
+      // Individual activity fetch failures are non-fatal for this rollup.
+      continue;
+    }
+    const efforts = (detail.best_efforts as Array<Record<string, unknown>> | undefined) ?? [];
+    if (efforts.length > 0) withBest++;
+    for (const e of efforts) {
+      const name = (e.name as string | undefined) ?? "";
+      if (name.toLowerCase() !== target) continue;
+      results.push({
+        activity_id: r.id,
+        activity_name: detail.name,
+        start_date_local: detail.start_date_local,
+        name,
+        distance: (e.distance as number | undefined) ?? 0,
+        moving_time: (e.moving_time as number | undefined) ?? 0,
+        elapsed_time: (e.elapsed_time as number | undefined) ?? 0,
+        pr_rank: (e.pr_rank as number | null | undefined) ?? null,
+        is_kom: Boolean(e.is_kom),
+        effort_id: e.id as number | undefined,
+      });
+    }
+  }
+  results.sort((a, b) => a.moving_time - b.moving_time);
+  return {
+    distance: opts.distance,
+    results,
+    activities_scanned: runs.length,
+    activities_with_best_efforts: withBest,
+  };
 }
 
 async function readCacheStats(

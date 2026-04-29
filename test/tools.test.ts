@@ -165,14 +165,21 @@ describe("get_athlete_profile", () => {
 });
 
 describe("get_recent_activities", () => {
-  it("unfiltered: fetches with per_page=limit and returns the result", async () => {
-    const activities = [{ id: 1 }, { id: 2 }];
+  it("unfiltered: returns {activities, count, next_after, next_before}", async () => {
+    const activities = [
+      { id: 1, start_date: "2025-04-10T08:00:00Z" },
+      { id: 2, start_date: "2025-04-08T08:00:00Z" },
+    ];
     const h = await createHarness([["/athlete/activities", activities]]);
     afterEach(() => h.close());
     const data = parseResult(
       await h.mcpClient.callTool({ name: "get_recent_activities", arguments: { limit: 2 } })
-    ) as unknown[];
-    expect(data).toHaveLength(2);
+    ) as { activities: { id: number }[]; count: number; next_after: number; next_before: number };
+    expect(data.activities).toHaveLength(2);
+    expect(data.count).toBe(2);
+    // Newest activity in the list is the next_after seed for "newer than this"
+    expect(data.next_after).toBe(Math.floor(new Date("2025-04-10T08:00:00Z").getTime() / 1000));
+    expect(data.next_before).toBe(Math.floor(new Date("2025-04-08T08:00:00Z").getTime() / 1000));
     const [path] = h.mockFetch.mock.calls[0] as [string];
     expect(path).toContain("per_page=2");
   });
@@ -184,15 +191,66 @@ describe("get_recent_activities", () => {
     const h = await createHarness([]);
     afterEach(() => h.close());
     h.mockFetch.mockImplementation(async () => {
-      const data = callCount++ === 0 ? runPage : [{ id: 77, type: "Ride", sport_type: "Ride" }];
+      const data =
+        callCount++ === 0
+          ? runPage
+          : [{ id: 77, type: "Ride", sport_type: "Ride", start_date: "2025-04-01T07:00:00Z" }];
       return new Response(JSON.stringify(data), { status: 200 });
     });
     const data = parseResult(
       await h.mcpClient.callTool({ name: "get_recent_activities", arguments: { limit: 1, activity_type: "Ride" } })
-    ) as { id: number }[];
-    expect(data).toHaveLength(1);
-    expect(data[0].id).toBe(77);
+    ) as { activities: { id: number }[] };
+    expect(data.activities).toHaveLength(1);
+    expect(data.activities[0].id).toBe(77);
     expect(h.mockFetch.mock.calls.length).toBe(2);
+  });
+
+  it("fields filter restricts each activity to the whitelist", async () => {
+    const activities = [
+      {
+        id: 1,
+        name: "Morning Run",
+        start_date: "2025-04-10T08:00:00Z",
+        distance: 5000,
+        moving_time: 1500,
+        average_heartrate: 145,
+        kudos_count: 7,
+        comment_count: 0,
+        photo_count: 0,
+      },
+    ];
+    const h = await createHarness([["/athlete/activities", activities]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({
+        name: "get_recent_activities",
+        arguments: {
+          limit: 1,
+          fields: ["id", "name", "distance", "moving_time", "average_heartrate"],
+        },
+      })
+    ) as { activities: Array<Record<string, unknown>> };
+    expect(Object.keys(data.activities[0]).sort()).toEqual([
+      "average_heartrate",
+      "distance",
+      "id",
+      "moving_time",
+      "name",
+    ]);
+    // Excluded fields really are gone (not just undefined)
+    expect(data.activities[0]).not.toHaveProperty("kudos_count");
+    expect(data.activities[0]).not.toHaveProperty("start_date");
+  });
+
+  it("returns null cursors when no activities matched", async () => {
+    const h = await createHarness([["/athlete/activities", []]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_recent_activities", arguments: { limit: 5 } })
+    ) as { count: number; next_after: number | null; next_before: number | null };
+    expect(data.count).toBe(0);
+    expect(data.next_after).toBeNull();
+    expect(data.next_before).toBeNull();
   });
 });
 
@@ -512,6 +570,152 @@ describe("get_activity_laps", () => {
     expect(data).toHaveLength(2);
     const [path] = h.mockFetch.mock.calls[0] as [string];
     expect(path).toContain("/activities/321/laps");
+  });
+});
+
+describe("get_athlete_summary", () => {
+  it("aggregates monthly buckets with weighted avg HR and pace", async () => {
+    // Three activities: two in Apr 2025, one in May 2025.
+    const activities = [
+      { id: 1, sport_type: "Run", start_date: "2025-04-05T08:00:00Z", start_date_local: "2025-04-05T08:00:00Z", distance: 5000, moving_time: 1500, elapsed_time: 1600, total_elevation_gain: 30, average_heartrate: 150 },
+      { id: 2, sport_type: "Run", start_date: "2025-04-20T08:00:00Z", start_date_local: "2025-04-20T08:00:00Z", distance: 10000, moving_time: 3000, elapsed_time: 3100, total_elevation_gain: 80, average_heartrate: 155 },
+      { id: 3, sport_type: "Run", start_date: "2025-05-02T08:00:00Z", start_date_local: "2025-05-02T08:00:00Z", distance: 3000, moving_time: 900, elapsed_time: 920, total_elevation_gain: 10 },
+    ];
+    const h = await createHarness([["/athlete/activities", activities]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({
+        name: "get_athlete_summary",
+        arguments: { granularity: "month" },
+      })
+    ) as {
+      buckets: Array<{
+        period_start: string;
+        count: number;
+        total_distance_m: number;
+        avg_heartrate: number | null;
+        avg_pace_per_km: number | null;
+      }>;
+      activity_count: number;
+    };
+    expect(data.activity_count).toBe(3);
+    expect(data.buckets).toHaveLength(2);
+    const apr = data.buckets.find((b) => b.period_start === "2025-04-01")!;
+    expect(apr.count).toBe(2);
+    expect(apr.total_distance_m).toBe(15000);
+    // Weighted avg HR: (150*1500 + 155*3000) / 4500 = 153.33...
+    expect(apr.avg_heartrate).toBeCloseTo((150 * 1500 + 155 * 3000) / 4500, 4);
+    // Avg pace: 4500 / 15 = 300 sec/km
+    expect(apr.avg_pace_per_km).toBeCloseTo(300, 4);
+    const may = data.buckets.find((b) => b.period_start === "2025-05-01")!;
+    expect(may.count).toBe(1);
+    // No HR data on the May activity → null avg
+    expect(may.avg_heartrate).toBeNull();
+  });
+
+  it("filters by activity_type", async () => {
+    const activities = [
+      { id: 1, sport_type: "Run", start_date: "2025-04-05T08:00:00Z", distance: 5000, moving_time: 1500 },
+      { id: 2, sport_type: "Ride", start_date: "2025-04-06T08:00:00Z", distance: 30000, moving_time: 3600 },
+    ];
+    const h = await createHarness([["/athlete/activities", activities]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({
+        name: "get_athlete_summary",
+        arguments: { activity_type: "Run", granularity: "month" },
+      })
+    ) as { activity_count: number; buckets: Array<{ count: number }> };
+    expect(data.activity_count).toBe(1);
+    expect(data.buckets[0].count).toBe(1);
+  });
+
+  it("supports week granularity (Monday-start ISO weeks)", async () => {
+    // Monday 2025-04-07 → Sunday 2025-04-13 is one ISO week.
+    const activities = [
+      { id: 1, sport_type: "Run", start_date: "2025-04-08T08:00:00Z", distance: 5000, moving_time: 1500 },
+      { id: 2, sport_type: "Run", start_date: "2025-04-13T08:00:00Z", distance: 7000, moving_time: 2000 },
+    ];
+    const h = await createHarness([["/athlete/activities", activities]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({
+        name: "get_athlete_summary",
+        arguments: { granularity: "week" },
+      })
+    ) as { buckets: Array<{ period_start: string; period_end: string; count: number }> };
+    expect(data.buckets).toHaveLength(1);
+    expect(data.buckets[0].period_start).toBe("2025-04-07");
+    expect(data.buckets[0].period_end).toBe("2025-04-13");
+    expect(data.buckets[0].count).toBe(2);
+  });
+});
+
+describe("get_athlete_best_efforts", () => {
+  it("scans Run activities and returns matching best_efforts sorted fastest-first", async () => {
+    const listPage = [
+      { id: 1, type: "Run", sport_type: "Run", start_date: "2025-04-10T08:00:00Z" },
+      { id: 2, type: "Ride", sport_type: "Ride", start_date: "2025-04-08T08:00:00Z" },
+      { id: 3, type: "Run", sport_type: "Run", start_date: "2025-04-05T08:00:00Z" },
+    ];
+    const h = await createHarness([
+      ["/athlete/activities", listPage],
+      ["/activities/1", {
+        id: 1,
+        name: "Tuesday Tempo",
+        sport_type: "Run",
+        start_date_local: "2025-04-10T08:00:00Z",
+        best_efforts: [
+          { name: "5k", distance: 5000, moving_time: 1240, elapsed_time: 1245, pr_rank: null, is_kom: false, id: 11 },
+        ],
+      }],
+      ["/activities/3", {
+        id: 3,
+        name: "Friday Fast 5",
+        sport_type: "Run",
+        start_date_local: "2025-04-05T08:00:00Z",
+        best_efforts: [
+          { name: "5k", distance: 5000, moving_time: 1180, elapsed_time: 1185, pr_rank: 1, is_kom: false, id: 33 },
+          { name: "10k", distance: 10000, moving_time: 2500 },
+        ],
+      }],
+    ]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({
+        name: "get_athlete_best_efforts",
+        arguments: { distance: "5k" },
+      })
+    ) as {
+      results: Array<{ activity_id: number; moving_time: number; pr_rank: number | null }>;
+      activities_scanned: number;
+      activities_with_best_efforts: number;
+    };
+    expect(data.activities_scanned).toBe(2); // Two Runs (the Ride was filtered out)
+    expect(data.activities_with_best_efforts).toBe(2);
+    expect(data.results).toHaveLength(2);
+    // Fastest first
+    expect(data.results[0].moving_time).toBe(1180);
+    expect(data.results[0].pr_rank).toBe(1);
+    expect(data.results[1].moving_time).toBe(1240);
+  });
+
+  it("returns an empty result list when no activities have a matching distance", async () => {
+    const listPage = [
+      { id: 1, type: "Run", sport_type: "Run", start_date: "2025-04-10T08:00:00Z" },
+    ];
+    const h = await createHarness([
+      ["/athlete/activities", listPage],
+      ["/activities/1", { id: 1, sport_type: "Run", best_efforts: [{ name: "10k", distance: 10000, moving_time: 2500 }] }],
+    ]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({
+        name: "get_athlete_best_efforts",
+        arguments: { distance: "marathon" },
+      })
+    ) as { results: unknown[] };
+    expect(data.results).toEqual([]);
   });
 });
 
