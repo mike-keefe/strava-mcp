@@ -204,6 +204,48 @@ describe("get_activity_zones", () => {
     const [path] = h.mockFetch.mock.calls[0] as [string];
     expect(path).toContain("/activities/5/zones");
   });
+
+  it("includes seconds_in_zone summed from distribution_buckets", async () => {
+    const zones = [
+      {
+        type: "heartrate",
+        sensor_based: true,
+        points: 10,
+        distribution_buckets: [
+          { min: 0, max: 100, time: 60 },
+          { min: 100, max: 130, time: 300 },
+          { min: 130, max: 150, time: 1200 },
+          { min: 150, max: 170, time: 240 },
+        ],
+      },
+      {
+        type: "power",
+        distribution_buckets: [
+          { min: 0, max: 100, time: 90 },
+          { min: 100, max: 200, time: 600 },
+        ],
+      },
+    ];
+    const h = await createHarness([["/activities/5/zones", zones]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_activity_zones", arguments: { activity_id: 5 } })
+    ) as Array<{ seconds_in_zone: number[] }>;
+    expect(data[0].seconds_in_zone).toEqual([60, 300, 1200, 240]);
+    expect(data[1].seconds_in_zone).toEqual([90, 600]);
+    // Sums match the moving-time-style total per zone block
+    expect(data[0].seconds_in_zone.reduce((a, b) => a + b, 0)).toBe(1800);
+  });
+
+  it("handles zone blocks with missing distribution_buckets gracefully", async () => {
+    const zones = [{ type: "heartrate", sensor_based: false }];
+    const h = await createHarness([["/activities/9/zones", zones]]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_activity_zones", arguments: { activity_id: 9 } })
+    ) as Array<{ seconds_in_zone: number[] }>;
+    expect(data[0].seconds_in_zone).toEqual([]);
+  });
 });
 
 describe("get_athlete_zones", () => {
