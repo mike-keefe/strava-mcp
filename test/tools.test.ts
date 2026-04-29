@@ -34,7 +34,15 @@ function mockKv(): KVNamespace {
     get: vi.fn().mockImplementation(async (key: string) => store.get(key) ?? null),
     put: vi.fn().mockImplementation(async (key: string, value: string) => { store.set(key, value); }),
     delete: vi.fn().mockImplementation(async (key: string) => { store.delete(key); }),
-    list: vi.fn().mockResolvedValue({ keys: [], list_complete: true, cacheStatus: null }),
+    list: vi.fn().mockImplementation(async (opts?: { prefix?: string; limit?: number }) => {
+      const prefix = opts?.prefix ?? "";
+      const limit = opts?.limit ?? 1000;
+      const keys = [...store.keys()]
+        .filter((k) => k.startsWith(prefix))
+        .slice(0, limit)
+        .map((name) => ({ name }));
+      return { keys, list_complete: true, cacheStatus: null };
+    }),
     getWithMetadata: vi.fn().mockResolvedValue({ value: null, metadata: null, cacheStatus: null }),
   } as unknown as KVNamespace;
 }
@@ -45,10 +53,27 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function createHarness(routes: FetchRoute[]): Promise<Harness> {
+interface HarnessOptions {
+  tokenCache?: KVNamespace;
+  streamCache?: KVNamespace;
+}
+
+function makeEnv(opts: HarnessOptions = {}): import("../src/types.js").Env {
+  return {
+    TOKEN_CACHE: opts.tokenCache ?? mockKv(),
+    STREAM_CACHE: opts.streamCache ?? mockKv(),
+    IP_RATE_LIMITER: {} as RateLimit,
+    MCP_AUTH_TOKEN: "test-token",
+    STRAVA_CLIENT_ID: "client123",
+    STRAVA_CLIENT_SECRET: "secret456",
+    STRAVA_REFRESH_TOKEN: "refresh789",
+  };
+}
+
+async function createHarness(routes: FetchRoute[], opts: HarnessOptions = {}): Promise<Harness> {
   const stravaClient = mockStravaClient(routes);
   const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerStravaTools(server, stravaClient as unknown as StravaClient, mockKv());
+  registerStravaTools(server, stravaClient as unknown as StravaClient, makeEnv(opts));
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const mcpClient = new Client({ name: "test-client", version: "0.0.0" });
@@ -487,5 +512,71 @@ describe("get_activity_laps", () => {
     expect(data).toHaveLength(2);
     const [path] = h.mockFetch.mock.calls[0] as [string];
     expect(path).toContain("/activities/321/laps");
+  });
+});
+
+describe("health (D2)", () => {
+  it("returns expected shape on a fresh deploy (no cached athlete, no rate-limit history)", async () => {
+    const h = await createHarness([
+      ["/athlete", { id: 42, username: "ada", firstname: "Ada", lastname: "L" }],
+    ]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "health", arguments: {} })
+    ) as {
+      worker_version: string;
+      athlete: { id: number; username: string };
+      rate_limit: unknown;
+      cache: { activity_summaries: number; stream_entries: number; lap_entries: number };
+    };
+    expect(typeof data.worker_version).toBe("string");
+    expect(data.athlete.id).toBe(42);
+    expect(data.athlete.username).toBe("ada");
+    // Fresh deploy: nothing stored yet
+    expect(data.rate_limit).toBeNull();
+    expect(data.cache).toEqual({ activity_summaries: 0, stream_entries: 0, lap_entries: 0 });
+  });
+
+  it("surfaces the latest rate-limit snapshot when one is cached", async () => {
+    const tokenCache = mockKv();
+    await tokenCache.put(
+      "rate_limit:latest",
+      JSON.stringify({
+        shortTermLimit: 100,
+        shortTermUsage: 7,
+        dailyLimit: 1000,
+        dailyUsage: 88,
+        updated_at: 1700000000,
+      })
+    );
+    const h = await createHarness(
+      [["/athlete", { id: 1, username: "u" }]],
+      { tokenCache }
+    );
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "health", arguments: {} })
+    ) as { rate_limit: { shortTermUsage: number; dailyUsage: number } };
+    expect(data.rate_limit.shortTermUsage).toBe(7);
+    expect(data.rate_limit.dailyUsage).toBe(88);
+  });
+
+  it("counts cache entries by prefix", async () => {
+    const streamCache = mockKv();
+    await streamCache.put("streams:1:all", "{}");
+    await streamCache.put("streams:2:all", "{}");
+    await streamCache.put("activity:1:summary", "{}");
+    await streamCache.put("laps:1", "[]");
+    await streamCache.put("laps:2", "[]");
+    await streamCache.put("laps:3", "[]");
+    const h = await createHarness(
+      [["/athlete", { id: 1, username: "u" }]],
+      { streamCache }
+    );
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "health", arguments: {} })
+    ) as { cache: { activity_summaries: number; stream_entries: number; lap_entries: number } };
+    expect(data.cache).toEqual({ activity_summaries: 1, stream_entries: 2, lap_entries: 3 });
   });
 });
