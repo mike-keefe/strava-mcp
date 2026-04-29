@@ -1,5 +1,6 @@
 import { StravaApiError } from "./client.js";
 import type { StravaClient } from "./client.js";
+import type { ActivityLap } from "./activity.js";
 import type { StreamType, StreamResolution } from "./types.js";
 
 export type StreamsUnitsMode = "raw" | "running" | "cycling" | "auto";
@@ -12,6 +13,7 @@ export interface StreamsParams {
   format?: "arrays" | "rows";
   sportType?: string;
   units?: StreamsUnitsMode;
+  laps?: ActivityLap[];
 }
 
 // Anything below this in m/s (~ 22:13 / km) is treated as stopped for the
@@ -135,6 +137,7 @@ export async function fetchActivityStreams(
     format = "arrays",
     sportType,
     units = "auto",
+    laps,
   } = params;
 
   const effectiveStreamTypes = streamTypes ?? defaultsForSport(sportType);
@@ -189,6 +192,13 @@ export async function fetchActivityStreams(
 
   const resolvedUnits = resolveUnitsMode(units, sportType);
   const derivedTypes: string[] = [];
+
+  if (laps && laps.length > 0 && outputData["time"]) {
+    const timeArr = outputData["time"] as (number | null)[];
+    outputData["lap_index"] = computeLapIndex(timeArr, laps);
+    derivedTypes.push("lap_index");
+  }
+
   if (resolvedUnits !== "raw" && returnedTypes.includes("velocity_smooth")) {
     const velocity = outputData["velocity_smooth"] as (number | null)[];
     if (resolvedUnits === "running") {
@@ -234,6 +244,41 @@ export async function fetchActivityStreams(
   }
 
   return { metadata, data: outputData };
+}
+
+// Builds an array, the same length as `time`, where each element is the
+// 0-based index of the lap that sample falls within. We work in elapsed
+// seconds (the time stream's units) rather than start_index/end_index from
+// Strava, because those refer to the original raw stream and don't survive
+// downsampling. Samples that don't fall in any lap come back as null —
+// shouldn't happen in practice, but better than asserting.
+export function computeLapIndex(
+  timeArr: (number | null)[],
+  laps: ActivityLap[]
+): (number | null)[] {
+  // Build [startSec, endSec] per lap from cumulative elapsed_time, sorted by
+  // lap_index so out-of-order results from Strava don't cause issues.
+  const sorted = [...laps].sort((a, b) => a.lap_index - b.lap_index);
+  const bounds: { start: number; end: number }[] = [];
+  let cursor = 0;
+  for (const lap of sorted) {
+    const start = cursor;
+    const end = start + (lap.elapsed_time ?? 0);
+    bounds.push({ start, end });
+    cursor = end;
+  }
+
+  return timeArr.map((t) => {
+    if (t === null || typeof t !== "number") return null;
+    for (let i = 0; i < bounds.length; i++) {
+      if (t >= bounds[i].start && t < bounds[i].end) return i;
+    }
+    // Edge case: the very last sample lands exactly on the final boundary.
+    if (bounds.length > 0 && t >= bounds[bounds.length - 1].end) {
+      return bounds.length - 1;
+    }
+    return null;
+  });
 }
 
 function resolveUnitsMode(

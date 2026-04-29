@@ -4,7 +4,7 @@ import { StravaApiError } from "./client.js";
 import type { StravaClient } from "./client.js";
 import { handleStravaError, assertOk } from "./errors.js";
 import { fetchActivityStreams, fetchSegmentEffortStreams } from "./streams.js";
-import { fetchActivitySummary } from "./activity.js";
+import { fetchActivitySummary, fetchActivityLaps } from "./activity.js";
 import type { StreamType } from "./types.js";
 
 function ok(data: unknown): { content: [{ type: "text"; text: string }] } {
@@ -163,8 +163,22 @@ export function registerStravaTools(
         .describe(
           "Units mode. 'auto' (default) derives from sport_type: pace_per_km for runs, speed_kmh for rides. 'raw' keeps only velocity_smooth in m/s."
         ),
+      include_lap_index: z
+        .boolean()
+        .optional()
+        .describe(
+          "If true, include a lap_index array (0-based lap each sample falls within) alongside the streams."
+        ),
     },
-    async ({ activity_id, stream_types, resolution, downsample_to_seconds, format, units }) => {
+    async ({
+      activity_id,
+      stream_types,
+      resolution,
+      downsample_to_seconds,
+      format,
+      units,
+      include_lap_index,
+    }) => {
       try {
         // Sport-aware defaults and 'auto' units mode both need sport_type. The
         // summary is cached, so this is cheap on repeat calls.
@@ -178,6 +192,9 @@ export function registerStravaTools(
             // If the summary fetch fails we'll fall back to generic defaults.
           }
         }
+        const laps = include_lap_index
+          ? await fetchActivityLaps(client, streamCache, activity_id).catch(() => undefined)
+          : undefined;
         const result = await fetchActivityStreams(client, streamCache, {
           activityId: activity_id,
           streamTypes: stream_types as StreamType[] | undefined,
@@ -186,6 +203,7 @@ export function registerStravaTools(
           format: format as "arrays" | "rows" | undefined,
           sportType,
           units: units as "raw" | "running" | "cycling" | "auto" | undefined,
+          laps,
         });
         return ok(result);
       } catch (err) {
