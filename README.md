@@ -108,7 +108,8 @@ The Worker URL is printed at the end: `https://strava-mcp.<your-subdomain>.worke
 ```bash
 npx wrangler secret put STRAVA_CLIENT_ID
 npx wrangler secret put STRAVA_CLIENT_SECRET
-npx wrangler secret put MCP_AUTH_TOKEN   # any random string — used for direct API access
+npx wrangler secret put MCP_AUTH_TOKEN        # any random string — used for direct API access
+npx wrangler secret put WEBHOOK_VERIFY_TOKEN  # any random string — used to verify Strava webhooks
 ```
 
 > **Note:** `STRAVA_REFRESH_TOKEN` is only needed if you want to use the static `MCP_AUTH_TOKEN` admin path. Users connecting through Claude's OAuth flow don't need it.
@@ -206,9 +207,24 @@ Tests use [Vitest](https://vitest.dev/) with `@cloudflare/vitest-pool-workers`. 
 | `STRAVA_CLIENT_ID` | Yes | Strava app Client ID |
 | `STRAVA_CLIENT_SECRET` | Yes | Strava app Client Secret |
 | `MCP_AUTH_TOKEN` | Yes | Bearer token for direct API access |
+| `WEBHOOK_VERIFY_TOKEN` | Yes | Random string used to verify the Strava push subscription |
 | `STRAVA_REFRESH_TOKEN` | Optional | Long-lived refresh token for the static auth path |
 
 Set via `npx wrangler secret put <NAME>`. Never commit these.
+
+### Registering the Strava webhook subscription (one-time)
+
+After deploying, register the push subscription so Strava can notify this server when a user deauthorizes the app:
+
+```bash
+curl -X POST https://www.strava.com/api/v3/push_subscriptions \
+  -F client_id=<STRAVA_CLIENT_ID> \
+  -F client_secret=<STRAVA_CLIENT_SECRET> \
+  -F callback_url=https://strava-mcp.<your-subdomain>.workers.dev/webhook \
+  -F verify_token=<WEBHOOK_VERIFY_TOKEN>
+```
+
+Strava immediately sends a `GET /webhook?hub.mode=subscribe&hub.challenge=...` to verify the endpoint. The Worker responds automatically. On success, Strava returns a subscription ID — no further action needed.
 
 ---
 

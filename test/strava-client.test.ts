@@ -26,6 +26,7 @@ function makeEnv(kv: KVNamespace): Env {
     STRAVA_CLIENT_ID: "client123",
     STRAVA_CLIENT_SECRET: "secret456",
     STRAVA_REFRESH_TOKEN: "refresh789",
+    WEBHOOK_VERIFY_TOKEN: "webhook-secret",
   };
 }
 

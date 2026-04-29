@@ -207,11 +207,20 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 0.5rem;
+      gap: 0.4rem;
       margin-bottom: 0.75rem;
+      font-size: 0.8rem;
+      color: #666;
     }
 
-    .strava-attribution img { height: 20px; opacity: 0.6; }
+    .strava-attribution a {
+      color: #fc4c02;
+      font-weight: 700;
+      text-decoration: none;
+      letter-spacing: -0.01em;
+    }
+
+    .strava-attribution a:hover { text-decoration: underline; }
 
     @media (max-width: 600px) {
       .hero h2 { font-size: 1.75rem; }
@@ -284,9 +293,7 @@
 
 <footer>
   <div class="strava-attribution">
-    <svg height="20" viewBox="0 0 100 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Powered by Strava">
-      <text x="0" y="15" fill="#fc4c02" font-family="-apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="0.5">Powered by Strava</text>
-    </svg>
+    Powered by <a href="https://www.strava.com" rel="noopener">Strava</a>
   </div>
   <p>
     <a href="https://github.com/mike-keefe/strava-mcp">GitHub</a> &middot;

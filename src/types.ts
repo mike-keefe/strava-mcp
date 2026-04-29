@@ -7,4 +7,5 @@ export interface Env {
   STRAVA_CLIENT_SECRET: string;
   STRAVA_REFRESH_TOKEN: string;
   LOG_LEVEL?: string;
+  WEBHOOK_VERIFY_TOKEN: string;
 }

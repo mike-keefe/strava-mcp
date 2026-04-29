@@ -140,10 +140,10 @@
   <h2>Your rights (GDPR / right to erasure)</h2>
   <p>You have the right to delete all data associated with your account at any time. To do so:</p>
   <ul>
-    <li><strong>Disconnect the connector in Claude</strong> — this revokes your token and triggers deletion of all associated KV records, including any cached stream data.</li>
-    <li><strong>Revoke access on Strava</strong> — go to <a href="https://www.strava.com/settings/apps">strava.com/settings/apps</a> and remove this app. This invalidates the underlying Strava tokens.</li>
+    <li><strong>Disconnect the connector in Claude</strong> — this revokes your token and triggers immediate deletion of all associated KV records, including any cached stream data.</li>
+    <li><strong>Revoke access on Strava</strong> — go to <a href="https://www.strava.com/settings/apps">strava.com/settings/apps</a> and remove this app. Strava notifies this server via webhook and all your stored data (tokens, stream cache) is deleted within seconds.</li>
   </ul>
-  <p>Both actions are sufficient to ensure your data is removed from this server.</p>
+  <p>Either action is sufficient to ensure your data is removed from this server.</p>
 
   <h2>Strava API terms</h2>
   <p>This application uses the <a href="https://developers.strava.com">Strava API</a> and complies with the <a href="https://www.strava.com/legal/api">Strava API Agreement</a>. By using this server, you also agree to Strava's terms. This application uses only read-only scopes (<code>read</code>, <code>activity:read_all</code>, <code>profile:read_all</code>) and never modifies your Strava data.</p>
