@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a new tool or improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before requesting a feature, note that this server is intentionally a **thin data layer**.
+        Tools that add smoothing, filtering, derived metrics, or analytical logic will not be added — those belong in Claude, not here.
+        If you're unsure whether your idea fits the design, describe it and we'll figure it out.
+  - type: textarea
+    id: description
+    attributes:
+      label: What would you like?
+      description: Describe the feature or improvement
+    validations:
+      required: true
+  - type: textarea
+    id: strava_endpoint
+    attributes:
+      label: Strava API endpoint (if applicable)
+      description: Which endpoint would this call?
+      placeholder: "GET /api/v3/..."
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What question would you ask Claude if this existed?
+      placeholder: '"Claude, show me all my activities where I hit a segment PR..."'
+    validations:
+      required: true
