@@ -742,6 +742,10 @@ interface HealthRateLimit {
   shortTermUsage: number;
   dailyLimit: number;
   dailyUsage: number;
+  readShortTermLimit?: number;
+  readShortTermUsage?: number;
+  readDailyLimit?: number;
+  readDailyUsage?: number;
   updated_at: number | null;
 }
 

@@ -244,8 +244,13 @@ export class StravaClient {
         const retryAfterSeconds = resetHeader
           ? Math.max(1, parseInt(resetHeader, 10) - Math.floor(Date.now() / 1000))
           : 60;
-        const limitInfo = this.lastRateLimitInfo
-          ? `(usage: ${this.lastRateLimitInfo.shortTermUsage}/${this.lastRateLimitInfo.shortTermLimit} short-term, ${this.lastRateLimitInfo.dailyUsage}/${this.lastRateLimitInfo.dailyLimit} daily)`
+        const li = this.lastRateLimitInfo;
+        const limitInfo = li
+          ? `(overall: ${li.shortTermUsage}/${li.shortTermLimit} short-term, ${li.dailyUsage}/${li.dailyLimit} daily` +
+            (li.readShortTermLimit !== undefined
+              ? `; read: ${li.readShortTermUsage}/${li.readShortTermLimit} short-term, ${li.readDailyUsage}/${li.readDailyLimit} daily`
+              : "") +
+            ")"
           : "";
         throw new StravaApiError(
           429,
@@ -314,5 +319,21 @@ function parseRateLimitHeaders(headers: Headers): StravaRateLimitInfo | null {
   const [shortTermLimit, dailyLimit] = limit.split(",").map(Number);
   const [shortTermUsage, dailyUsage] = usage.split(",").map(Number);
   if ([shortTermLimit, dailyLimit, shortTermUsage, dailyUsage].some(isNaN)) return null;
-  return { shortTermLimit, shortTermUsage, dailyLimit, dailyUsage };
+
+  const info: StravaRateLimitInfo = { shortTermLimit, shortTermUsage, dailyLimit, dailyUsage };
+
+  const readLimit = headers.get("X-ReadRateLimit-Limit");
+  const readUsage = headers.get("X-ReadRateLimit-Usage");
+  if (readLimit && readUsage) {
+    const [readShortTermLimit, readDailyLimit] = readLimit.split(",").map(Number);
+    const [readShortTermUsage, readDailyUsage] = readUsage.split(",").map(Number);
+    if (![readShortTermLimit, readDailyLimit, readShortTermUsage, readDailyUsage].some(isNaN)) {
+      info.readShortTermLimit = readShortTermLimit;
+      info.readShortTermUsage = readShortTermUsage;
+      info.readDailyLimit = readDailyLimit;
+      info.readDailyUsage = readDailyUsage;
+    }
+  }
+
+  return info;
 }
