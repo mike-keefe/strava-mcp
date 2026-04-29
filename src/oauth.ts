@@ -8,6 +8,8 @@ const KV = {
   token: (t: string) => `oauth:token:${t}`,
   client: (id: string) => `oauth:client:${id}`,
   session: (s: string) => `oauth:session:${s}`,
+  // Reverse index: Strava athlete ID → our OAuth token (for webhook deauth)
+  athlete: (id: number) => `strava:athlete:${id}`,
 };
 
 const SESSION_TTL_SECONDS = 600; // 10 min to complete Strava auth
@@ -16,6 +18,7 @@ const TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60; // 1 year
 
 const STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize";
 const STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token";
+const STRAVA_API_BASE = "https://www.strava.com/api/v3";
 const STRAVA_SCOPES = "read,activity:read_all,profile:read_all";
 
 // Shared with StravaClient — per-user Strava access token cache key
@@ -30,6 +33,7 @@ export function isOAuthPath(pathname: string): boolean {
   return (
     pathname === "/.well-known/oauth-authorization-server" ||
     pathname === "/.well-known/oauth-protected-resource" ||
+    pathname === "/webhook" ||
     pathname.startsWith("/oauth/")
   );
 }
@@ -56,6 +60,15 @@ export async function handleOAuth(request: Request, env: Env): Promise<Response>
   if (pathname === "/oauth/token" && request.method === "POST") {
     return tokenEndpoint(request, env, origin);
   }
+  if (pathname === "/oauth/revoke" && request.method === "POST") {
+    return revokeEndpoint(request, env);
+  }
+  if (pathname === "/webhook" && request.method === "GET") {
+    return webhookVerify(request, env);
+  }
+  if (pathname === "/webhook" && request.method === "POST") {
+    return webhookEvent(request, env);
+  }
   return new Response("Not Found", { status: 404 });
 }
 
@@ -78,11 +91,13 @@ function authServerMetadata(origin: string): Response {
     authorization_endpoint: `${origin}/oauth/authorize`,
     token_endpoint: `${origin}/oauth/token`,
     registration_endpoint: `${origin}/oauth/register`,
+    revocation_endpoint: `${origin}/oauth/revoke`,
     scopes_supported: ["mcp"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
+    revocation_endpoint_auth_methods_supported: ["none"],
   });
 }
 
@@ -392,12 +407,115 @@ async function handleAuthCodeGrant(
     );
   }
 
+  // Store a reverse index (Strava athlete ID → our OAuth token) so the
+  // deauthorization webhook can look up and clean up the right user's data.
+  try {
+    const athleteRes = await fetch(`${STRAVA_API_BASE}/athlete`, {
+      headers: { Authorization: `Bearer ${codeRecord.stravaAccessToken}` },
+    });
+    if (athleteRes.ok) {
+      const athlete = (await athleteRes.json()) as { id: number };
+      await env.TOKEN_CACHE.put(KV.athlete(athlete.id), accessToken, {
+        expirationTtl: TOKEN_TTL_SECONDS,
+      });
+    }
+  } catch {
+    // Non-fatal: webhook deauth lookup won't work but /oauth/revoke still will
+  }
+
   return json({
     access_token: accessToken,
     token_type: "Bearer",
     expires_in: TOKEN_TTL_SECONDS,
     scope: "mcp",
   });
+}
+
+// ---------------------------------------------------------------------------
+// Shared user data cleanup — used by /oauth/revoke and the webhook
+// ---------------------------------------------------------------------------
+
+async function deleteUserData(oauthToken: string, env: Env): Promise<void> {
+  await Promise.all([
+    env.TOKEN_CACHE.delete(KV.token(oauthToken)),
+    env.TOKEN_CACHE.delete(stravaTokenCacheKey(oauthToken)),
+  ]);
+  const listed = await env.STREAM_CACHE.list({ prefix: `${oauthToken}:streams:` });
+  if (listed.keys.length > 0) {
+    await Promise.all(listed.keys.map((k) => env.STREAM_CACHE.delete(k.name)));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Revocation endpoint (RFC 7009)
+// ---------------------------------------------------------------------------
+
+async function revokeEndpoint(request: Request, env: Env): Promise<Response> {
+  let body: URLSearchParams;
+  try {
+    body = new URLSearchParams(await request.text());
+  } catch {
+    return oauthError("invalid_request", "Invalid request body");
+  }
+
+  const token = body.get("token");
+  if (!token) {
+    return oauthError("invalid_request", "token parameter is required");
+  }
+
+  // RFC 7009 §2.2: unknown/already-revoked tokens MUST return 200
+  const exists = await env.TOKEN_CACHE.get(KV.token(token));
+  if (!exists) {
+    return new Response(null, { status: 200 });
+  }
+
+  await deleteUserData(token, env);
+  return new Response(null, { status: 200 });
+}
+
+// ---------------------------------------------------------------------------
+// Strava webhook (push subscription) — deauthorization events
+// ---------------------------------------------------------------------------
+
+function webhookVerify(request: Request, env: Env): Response {
+  const url = new URL(request.url);
+  const mode = url.searchParams.get("hub.mode");
+  const challenge = url.searchParams.get("hub.challenge");
+  const verifyToken = url.searchParams.get("hub.verify_token");
+
+  if (mode !== "subscribe" || !challenge) {
+    return new Response("Bad Request", { status: 400 });
+  }
+  if (!env.WEBHOOK_VERIFY_TOKEN || verifyToken !== env.WEBHOOK_VERIFY_TOKEN) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  return json({ "hub.challenge": challenge });
+}
+
+async function webhookEvent(request: Request, env: Env): Promise<Response> {
+  let event: { object_type?: string; aspect_type?: string; owner_id?: number };
+  try {
+    event = (await request.json()) as typeof event;
+  } catch {
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  // Only act on athlete deauthorization; acknowledge all other events
+  if (event.object_type !== "athlete" || event.aspect_type !== "delete") {
+    return new Response(null, { status: 200 });
+  }
+
+  const athleteId = event.owner_id;
+  if (typeof athleteId === "number") {
+    const oauthToken = await env.TOKEN_CACHE.get(KV.athlete(athleteId));
+    if (oauthToken) {
+      await deleteUserData(oauthToken, env);
+      await env.TOKEN_CACHE.delete(KV.athlete(athleteId));
+    }
+  }
+
+  return new Response(null, { status: 200 });
 }
 
 // ---------------------------------------------------------------------------

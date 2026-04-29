@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — strava-mcp</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e8e8e8;
+      line-height: 1.7;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      border-bottom: 1px solid #222;
+      padding: 1.5rem 2rem;
+    }
+
+    header a {
+      color: #888;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+
+    header a:hover { color: #fff; }
+
+    main {
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 4rem 2rem;
+      flex: 1;
+    }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 0.5rem;
+    }
+
+    .updated {
+      color: #666;
+      font-size: 0.85rem;
+      margin-bottom: 3rem;
+    }
+
+    h2 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin: 2.5rem 0 0.75rem;
+      color: #fff;
+    }
+
+    p, li {
+      color: #aaa;
+      font-size: 0.95rem;
+      margin-bottom: 0.75rem;
+    }
+
+    ul {
+      padding-left: 1.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    ul li { margin-bottom: 0.4rem; }
+
+    a { color: #fc4c02; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .highlight {
+      background: #161616;
+      border: 1px solid #222;
+      border-left: 3px solid #fc4c02;
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      margin: 1.5rem 0;
+    }
+
+    .highlight p { margin-bottom: 0; }
+
+    footer {
+      border-top: 1px solid #1a1a1a;
+      padding: 1.5rem 2rem;
+      text-align: center;
+      font-size: 0.8rem;
+      color: #555;
+    }
+
+    footer a { color: #888; text-decoration: none; }
+    footer a:hover { color: #ccc; }
+  </style>
+</head>
+<body>
+
+<header>
+  <a href="index.html">← strava-mcp</a>
+</header>
+
+<main>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: April 2025</p>
+
+  <div class="highlight">
+    <p>Short version: this server stores only the tokens needed to call the Strava API on your behalf. No activity data, routes, or health metrics are stored permanently. You can delete your data at any time.</p>
+  </div>
+
+  <h2>What data is stored</h2>
+  <p>When you connect your Strava account, the following is stored in Cloudflare KV (a key-value store operated by Cloudflare, Inc.):</p>
+  <ul>
+    <li>An OAuth access token issued by this server (used to authenticate your requests to the MCP server)</li>
+    <li>Your Strava refresh token (used to request fresh Strava access tokens on your behalf)</li>
+    <li>A cached Strava access token (short-lived, refreshed automatically)</li>
+    <li>Temporarily: stream data from individual Strava activities, cached for up to 30 days to reduce API calls to Strava. This cache is stored per-user and deleted when you revoke access.</li>
+  </ul>
+
+  <h2>What data is never stored</h2>
+  <ul>
+    <li>Your name, email, or Strava profile details</li>
+    <li>Your activity history, routes, segments, or any other Strava data beyond the short-lived stream cache described above</li>
+    <li>Any data beyond what is needed to fulfil your requests to Claude</li>
+  </ul>
+
+  <h2>How data is used</h2>
+  <p>Tokens are used solely to call the Strava API in response to your requests made through Claude. No data is shared with third parties, used for analytics, or sold.</p>
+  <p>This server is a thin pass-through. It does not analyse, process, or store your Strava activity data. All data returned from the Strava API is passed directly to Claude and is not retained.</p>
+
+  <h2>Data retention</h2>
+  <ul>
+    <li>OAuth access tokens: stored for up to 1 year, or until revoked.</li>
+    <li>Strava access token cache: expires automatically (typically 6 hours).</li>
+    <li>Stream cache: expires after 30 days per activity, or is deleted immediately on revocation.</li>
+  </ul>
+
+  <h2>Your rights (GDPR / right to erasure)</h2>
+  <p>You have the right to delete all data associated with your account at any time. To do so:</p>
+  <ul>
+    <li><strong>Disconnect the connector in Claude</strong> — this revokes your token and triggers immediate deletion of all associated KV records, including any cached stream data.</li>
+    <li><strong>Revoke access on Strava</strong> — go to <a href="https://www.strava.com/settings/apps">strava.com/settings/apps</a> and remove this app. Strava notifies this server via webhook and all your stored data (tokens, stream cache) is deleted within seconds.</li>
+  </ul>
+  <p>Either action is sufficient to ensure your data is removed from this server.</p>
+
+  <h2>Strava API terms</h2>
+  <p>This application uses the <a href="https://developers.strava.com">Strava API</a> and complies with the <a href="https://www.strava.com/legal/api">Strava API Agreement</a>. By using this server, you also agree to Strava's terms. This application uses only read-only scopes (<code>read</code>, <code>activity:read_all</code>, <code>profile:read_all</code>) and never modifies your Strava data.</p>
+
+  <h2>Self-hosted deployments</h2>
+  <p>strava-mcp is open source. If you deploy your own instance, you control all stored data. This privacy policy applies only to instances explicitly operated by the project maintainer. For self-hosted deployments, you are the data controller.</p>
+
+  <h2>Infrastructure</h2>
+  <p>This server runs on <a href="https://workers.cloudflare.com">Cloudflare Workers</a>. Token data is stored in <a href="https://developers.cloudflare.com/kv/">Cloudflare KV</a>, which is subject to <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>. Cloudflare may process data in multiple regions.</p>
+
+  <h2>Observability and logging</h2>
+  <p>Worker-level observability is disabled. No request logs, token values, or response bodies are stored by the server. Standard Cloudflare infrastructure logs (IP addresses, request counts) may be retained by Cloudflare per their own policy.</p>
+
+  <h2>Contact</h2>
+  <p>For privacy-related requests or questions, open an issue at <a href="https://github.com/mike-keefe/strava-mcp">github.com/mike-keefe/strava-mcp</a> or email <a href="mailto:privacy@mikekeefe.com">privacy@mikekeefe.com</a>.</p>
+</main>
+
+<footer>
+  <p><a href="index.html">strava-mcp</a> &middot; <a href="https://github.com/mike-keefe/strava-mcp">GitHub</a></p>
+</footer>
+
+</body>
+</html>

@@ -91,7 +91,7 @@ describe("fetchActivityStreams", () => {
 
     // Second call — should hit cache
     const cachedValue = (kv.put as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-    const kv2 = makeKv({ "streams:123:all": cachedValue });
+    const kv2 = makeKv({ "static:streams:123:all": cachedValue });
     const client2 = makeClient(fixture);
     await fetchActivityStreams(client2, kv2, { activityId: 123 });
     expect((client2.fetch as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
@@ -238,7 +238,7 @@ describe("fetchActivityStreams", () => {
       },
       presentTypes: ["time", "distance", "heartrate", "cadence"],
     };
-    const kv = makeKv({ "streams:42:all": JSON.stringify(fullPayload) });
+    const kv = makeKv({ "static:streams:42:all": JSON.stringify(fullPayload) });
     const client = {
       fetch: vi.fn(),
       lastRateLimitInfo: null,
@@ -277,7 +277,7 @@ describe("fetchActivityStreams", () => {
       time: { type: "time", data: [0, 1, 2], series_type: "time", original_size: 3, resolution: "high" },
       distance: { type: "distance", data: [0, 5, 10], series_type: "time", original_size: 3, resolution: "high" },
     };
-    const kv = makeKv({ "streams:7:all": JSON.stringify(legacy) });
+    const kv = makeKv({ "static:streams:7:all": JSON.stringify(legacy) });
     const client = {
       fetch: vi.fn(),
       lastRateLimitInfo: null,
@@ -302,7 +302,7 @@ describe("fetchActivityStreams", () => {
       },
       presentTypes: ["time", "heartrate"],
     };
-    const kv = makeKv({ "streams:55:all": JSON.stringify(cached) });
+    const kv = makeKv({ "static:streams:55:all": JSON.stringify(cached) });
     const client = {
       fetch: vi.fn(),
       lastRateLimitInfo: null,

@@ -37,6 +37,11 @@ export interface StravaRateLimitInfo {
   shortTermUsage: number;
   dailyLimit: number;
   dailyUsage: number;
+  // Read-specific tier (subset of overall — the binding limit for read-only apps)
+  readShortTermLimit?: number;
+  readShortTermUsage?: number;
+  readDailyLimit?: number;
+  readDailyUsage?: number;
 }
 
 export interface StravaError {
