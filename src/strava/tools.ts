@@ -215,7 +215,7 @@ export function registerStravaTools(
   // Issue #7 — get_activity_zones
   server.tool(
     "get_activity_zones",
-    "HR and power zone distribution for an activity, as reported by Strava. No re-bucketing.",
+    "HR and power zone distribution for an activity, as reported by Strava. Each zone block is augmented with seconds_in_zone summed from its distribution buckets — no re-bucketing.",
     {
       activity_id: z.number().int().describe("The Strava activity ID"),
     },
@@ -223,7 +223,15 @@ export function registerStravaTools(
       try {
         const res = await client.fetch(`/activities/${activity_id}/zones`);
         assertOk(res);
-        return ok(await res.json());
+        const zones = (await res.json()) as Array<{
+          distribution_buckets?: Array<{ time?: number }>;
+          [k: string]: unknown;
+        }>;
+        const enriched = zones.map((z) => ({
+          ...z,
+          seconds_in_zone: (z.distribution_buckets ?? []).map((b) => b.time ?? 0),
+        }));
+        return ok(enriched);
       } catch (err) {
         return handleStravaError(err);
       }
