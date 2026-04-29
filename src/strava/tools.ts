@@ -438,7 +438,7 @@ export function registerStravaTools(
     "All of the athlete's efforts on a segment over time. Good for tracking improvement on a specific climb.",
     {
       segment_id: z.number().int().describe("The Strava segment ID"),
-      start_date_local: z.string().optional().describe("ISO 8601 start date filter, e.g. '2025-01-01T00:00:00Z'"),
+      start_date_local: z.string().optional().describe("ISO 8601 start date filter, e.g. '2026-01-01T00:00:00Z'"),
       end_date_local: z.string().optional().describe("ISO 8601 end date filter"),
       per_page: z.number().int().min(1).max(200).default(200).describe("Max efforts to return"),
     },

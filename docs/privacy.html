@@ -104,7 +104,7 @@
 
 <main>
   <h1>Privacy Policy</h1>
-  <p class="updated">Last updated: April 2025</p>
+  <p class="updated">Last updated: April 2026</p>
 
   <div class="highlight">
     <p>Short version: this server stores only the tokens needed to call the Strava API on your behalf. No activity data, routes, or health metrics are stored permanently. You can delete your data at any time.</p>
@@ -137,13 +137,31 @@
     <li>Stream cache: expires after 30 days per activity, or is deleted immediately on revocation.</li>
   </ul>
 
-  <h2>Your rights (GDPR / right to erasure)</h2>
-  <p>You have the right to delete all data associated with your account at any time. To do so:</p>
+  <h2>Data controller</h2>
+  <p>The data controller for this service is Mike Keefe (<a href="mailto:privacy@mikekeefe.com">privacy@mikekeefe.com</a>). For any privacy-related requests, contact this address or open an issue on <a href="https://github.com/mike-keefe/strava-mcp">GitHub</a>.</p>
+
+  <h2>Lawful basis for processing</h2>
+  <p>Data is processed on the basis of <strong>performance of a contract</strong> (Article 6(1)(b) GDPR): storing your tokens is necessary to provide the service you requested — calling the Strava API on your behalf in response to queries made through Claude. Without storing these tokens, the service cannot function.</p>
+
+  <h2>Your rights under GDPR</h2>
+  <p>If you are in the EEA, UK, or another jurisdiction with similar data protection laws, you have the following rights:</p>
   <ul>
-    <li><strong>Disconnect the connector in Claude</strong> — this revokes your token and triggers immediate deletion of all associated KV records, including any cached stream data.</li>
-    <li><strong>Revoke access on Strava</strong> — go to <a href="https://www.strava.com/settings/apps">strava.com/settings/apps</a> and remove this app. Strava notifies this server via webhook and all your stored data (tokens, stream cache) is deleted within seconds.</li>
+    <li><strong>Right of access</strong> — you can request a copy of the data held about you. In practice, this is limited to your OAuth tokens (which are opaque values) and, if applicable, temporarily cached stream data. Contact <a href="mailto:privacy@mikekeefe.com">privacy@mikekeefe.com</a> to request this.</li>
+    <li><strong>Right to erasure</strong> — you can delete all data at any time:
+      <ul>
+        <li><strong>Disconnect the connector in Claude</strong> — revokes your token and immediately deletes all associated KV records, including stream cache.</li>
+        <li><strong>Revoke access on Strava</strong> — go to <a href="https://www.strava.com/settings/apps">strava.com/settings/apps</a> and remove this app. Strava notifies this server via webhook and all stored data is deleted within seconds.</li>
+      </ul>
+      Either action alone is sufficient.
+    </li>
+    <li><strong>Right to data portability</strong> — you can request the data held about you in a machine-readable format. Given that the only data stored is token values and ephemeral caches, there is little to port; contact <a href="mailto:privacy@mikekeefe.com">privacy@mikekeefe.com</a> if you need this.</li>
+    <li><strong>Right to rectification</strong> — if any stored data is inaccurate, you can request correction. In practice, token values are system-generated and cannot be corrected independently; revoking and re-authorising will replace them.</li>
+    <li><strong>Right to object / right to restrict processing</strong> — you can object to processing or request that processing is restricted. Because tokens are required for the service to function, the practical effect of exercising this right is that the service cannot be provided and your data will be deleted.</li>
   </ul>
-  <p>Either action is sufficient to ensure your data is removed from this server.</p>
+  <p>To exercise any of these rights, email <a href="mailto:privacy@mikekeefe.com">privacy@mikekeefe.com</a> or open an issue on GitHub. Requests will be addressed within 30 days.</p>
+
+  <h2>Right to complain to a supervisory authority</h2>
+  <p>If you believe your data protection rights have been violated, you have the right to lodge a complaint with a data protection supervisory authority. In the UK this is the <a href="https://ico.org.uk">Information Commissioner's Office (ICO)</a>; in the EU, contact your national data protection authority.</p>
 
   <h2>Strava API terms</h2>
   <p>This application uses the <a href="https://developers.strava.com">Strava API</a> and complies with the <a href="https://www.strava.com/legal/api">Strava API Agreement</a>. By using this server, you also agree to Strava's terms. This application uses only read-only scopes (<code>read</code>, <code>activity:read_all</code>, <code>profile:read_all</code>) and never modifies your Strava data.</p>

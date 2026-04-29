@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>strava-mcp — Strava for Claude</title>
+  <title>strava-mcp — Strava data access via MCP</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -60,7 +60,7 @@
     .hero p {
       font-size: 1.1rem;
       color: #aaa;
-      max-width: 540px;
+      max-width: 560px;
       margin-bottom: 2rem;
     }
 
@@ -107,9 +107,11 @@
       font-size: 0.85rem;
       color: #888;
       text-align: center;
+      line-height: 2;
     }
 
     .diagram .arrow { color: #fc4c02; }
+    .diagram .sub { font-size: 0.75rem; color: #555; margin-top: 0.25rem; }
 
     section { margin: 3.5rem 0; }
 
@@ -146,6 +148,32 @@
       color: #888;
     }
 
+    .guarantees {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 0.65rem;
+    }
+
+    .guarantee {
+      background: #161616;
+      border: 1px solid #222;
+      border-radius: 6px;
+      padding: 0.7rem 1rem;
+      font-size: 0.88rem;
+      color: #aaa;
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+    }
+
+    .guarantee::before {
+      content: "✗";
+      color: #fc4c02;
+      font-weight: 700;
+      font-size: 0.8rem;
+      flex-shrink: 0;
+    }
+
     .steps ol {
       list-style: none;
       counter-reset: steps;
@@ -178,6 +206,15 @@
 
     .steps li p { color: #aaa; font-size: 0.95rem; }
     .steps li strong { color: #e8e8e8; }
+    .steps li code {
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.82rem;
+      background: #1e1e1e;
+      border: 1px solid #2a2a2a;
+      padding: 0.1em 0.35em;
+      border-radius: 3px;
+      color: #ccc;
+    }
 
     .privacy-note {
       background: #161616;
@@ -238,55 +275,73 @@
 
 <main>
   <div class="hero">
-    <h2>Your Strava data,<br>inside Claude.</h2>
-    <p>A remote MCP server that connects Claude to your Strava account. Ask Claude to analyse training trends, explore segments, compare efforts, and more — all in conversation.</p>
+    <h2>Your Strava data,<br>ready to query.</h2>
+    <p>A read-only MCP server that connects your Strava account to any MCP-compatible assistant — Claude, Cursor, Windsurf, and others. Ask questions about your training data directly in conversation. No data stored. No model training. No sharing.</p>
     <a class="cta" href="https://github.com/mike-keefe/strava-mcp">View on GitHub</a>
     <a class="cta-secondary" href="privacy.html">Privacy policy</a>
   </div>
 
   <div class="diagram">
-    Claude <span class="arrow">──OAuth 2.0──▶</span> strava-mcp Worker <span class="arrow">──Strava API──▶</span> Your activity data
+    <div>Your MCP client <span class="arrow">──OAuth 2.0──▶</span> strava-mcp Worker <span class="arrow">──Strava API──▶</span> Your data</div>
+    <div class="sub">Claude · Cursor · Windsurf · VS Code Copilot · any MCP-compatible client</div>
   </div>
 
   <section>
-    <h3>15 read-only tools</h3>
+    <h3>What this is not</h3>
+    <div class="guarantees">
+      <div class="guarantee">No model training — Strava data is never used to train AI models</div>
+      <div class="guarantee">No data aggregation — each user accesses only their own data</div>
+      <div class="guarantee">No persistent storage — activity data is never stored permanently</div>
+      <div class="guarantee">No cross-user visibility — one user's data is never accessible to another</div>
+      <div class="guarantee">No write operations — read-only Strava scopes, always</div>
+      <div class="guarantee">No replication of Strava features — no leaderboards, no public rankings</div>
+    </div>
+  </section>
+
+  <section>
+    <h3>19 read-only tools</h3>
     <div class="tools-grid">
       <div class="tool"><code>get_athlete_profile</code><p>Name, location, weight, FTP</p></div>
-      <div class="tool"><code>get_recent_activities</code><p>Activity list with filters</p></div>
+      <div class="tool"><code>get_recent_activities</code><p>Activity list with filters &amp; pagination</p></div>
       <div class="tool"><code>get_activity_details</code><p>Full activity breakdown</p></div>
-      <div class="tool"><code>get_activity_streams</code><p>Raw per-second data</p></div>
+      <div class="tool"><code>get_activity_streams</code><p>Raw per-second sensor data</p></div>
+      <div class="tool"><code>get_activity_best_efforts</code><p>Best efforts with PR ranks</p></div>
+      <div class="tool"><code>get_athlete_best_efforts</code><p>Best efforts at a distance, over time</p></div>
+      <div class="tool"><code>get_athlete_summary</code><p>Weekly / monthly rollups</p></div>
       <div class="tool"><code>get_activity_zones</code><p>HR &amp; power zone distribution</p></div>
-      <div class="tool"><code>get_activity_laps</code><p>Manually-pressed laps</p></div>
+      <div class="tool"><code>get_activity_laps</code><p>Lap-by-lap breakdown</p></div>
       <div class="tool"><code>get_athlete_zones</code><p>Your zone thresholds</p></div>
       <div class="tool"><code>get_athlete_stats</code><p>Recent / YTD / all-time totals</p></div>
       <div class="tool"><code>get_segment_details</code><p>Segment info &amp; your PR</p></div>
-      <div class="tool"><code>list_my_segment_efforts</code><p>All efforts on a segment</p></div>
+      <div class="tool"><code>list_my_segment_efforts</code><p>All your efforts on a segment</p></div>
       <div class="tool"><code>get_segment_effort_streams</code><p>Per-second segment streams</p></div>
       <div class="tool"><code>explore_segments</code><p>Find segments in a bounding box</p></div>
       <div class="tool"><code>list_routes</code><p>Your saved routes</p></div>
       <div class="tool"><code>get_route_details</code><p>Route metadata &amp; streams</p></div>
       <div class="tool"><code>list_gear</code><p>Bikes &amp; shoes with mileage</p></div>
+      <div class="tool"><code>health</code><p>Rate limits, cache stats, diagnostics</p></div>
     </div>
   </section>
 
   <section>
-    <h3>Deploy your own in 7 steps</h3>
+    <h3>Deploy your own in 8 steps</h3>
     <div class="steps">
       <ol>
         <li><p><strong>Clone the repo</strong> and run <code>pnpm install</code>.</p></li>
-        <li><p><strong>Create a Strava API app</strong> at <a href="https://www.strava.com/settings/api" style="color:#fc4c02">strava.com/settings/api</a>. Note your Client ID and Secret.</p></li>
+        <li><p><strong>Create a Strava API app</strong> at <a href="https://www.strava.com/settings/api" style="color:#fc4c02">strava.com/settings/api</a>. Note your Client ID and Secret. Set the callback domain to <code>localhost</code> for now.</p></li>
         <li><p><strong>Create a Cloudflare account</strong> (free tier works) and run <code>npx wrangler login</code>.</p></li>
-        <li><p><strong>Create KV namespaces</strong> with <code>npx wrangler kv namespace create TOKEN_CACHE</code> and <code>STREAM_CACHE</code>. Paste the IDs into <code>wrangler.jsonc</code>.</p></li>
+        <li><p><strong>Create KV namespaces</strong> — run <code>npx wrangler kv namespace create TOKEN_CACHE</code> and <code>STREAM_CACHE</code> (plus <code>--preview</code> variants). Paste the IDs into <code>wrangler.jsonc</code>.</p></li>
         <li><p><strong>Deploy</strong> with <code>pnpm run deploy</code>. Your Worker URL is printed at the end.</p></li>
-        <li><p><strong>Set secrets</strong> — <code>STRAVA_CLIENT_ID</code>, <code>STRAVA_CLIENT_SECRET</code>, <code>MCP_AUTH_TOKEN</code> — via <code>npx wrangler secret put</code>.</p></li>
-        <li><p><strong>Add the connector in Claude</strong>: Settings → Connectors → Add custom connector → paste your Worker URL + <code>/mcp</code>.</p></li>
+        <li><p><strong>Set secrets</strong> via <code>npx wrangler secret put</code> — <code>STRAVA_CLIENT_ID</code>, <code>STRAVA_CLIENT_SECRET</code>, <code>MCP_AUTH_TOKEN</code>, and <code>WEBHOOK_VERIFY_TOKEN</code>.</p></li>
+        <li><p><strong>Update the Strava callback domain</strong> to your Worker's hostname, then register the webhook subscription so Strava can notify you on deauthorisation. See the <a href="https://github.com/mike-keefe/strava-mcp#7-register-the-strava-webhook-one-time" style="color:#fc4c02">README</a> for the one-line curl command.</p></li>
+        <li><p><strong>Add the server in your MCP client.</strong> In Claude: Settings → Connectors → Add custom connector → paste your Worker URL + <code>/mcp</code>. Other clients follow a similar pattern — check their MCP documentation.</p></li>
       </ol>
     </div>
   </section>
 
   <section>
     <div class="privacy-note">
-      <strong>Privacy:</strong> This server is a thin pass-through. It stores only the OAuth tokens needed to call the Strava API on your behalf. No activity data is stored permanently. You can revoke access at any time from Strava's connected apps page or by disconnecting the connector in Claude. <a href="privacy.html">Full privacy policy →</a>
+      <strong>Privacy:</strong> This server is a thin pass-through. It stores only the OAuth tokens needed to call the Strava API on your behalf. No activity data is stored permanently. Strava data is never used for model training. You can revoke access at any time from Strava's connected apps page or by disconnecting in your MCP client. <a href="privacy.html">Full privacy policy →</a>
     </div>
   </section>
 </main>
