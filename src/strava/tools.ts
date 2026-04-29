@@ -225,9 +225,11 @@ export function registerStravaTools(
         .optional()
         .describe("Stream types to fetch. Defaults to time, distance, heartrate, velocity_smooth, altitude, cadence"),
       resolution: z
-        .enum(["low", "medium", "high", "all"])
+        .enum(["low", "medium", "high"])
         .optional()
-        .describe("Data resolution. Default 'all' for maximum fidelity"),
+        .describe(
+          "Currently informational only — the server always fetches at Strava's 'high' resolution and caches the full payload. Use downsample_to_seconds to reduce sample count."
+        ),
       downsample_to_seconds: z
         .number()
         .int()
@@ -299,7 +301,7 @@ export function registerStravaTools(
         const result = await fetchActivityStreams(client, streamCache, {
           activityId: activity_id,
           streamTypes: stream_types as StreamType[] | undefined,
-          resolution: resolution as "low" | "medium" | "high" | "all" | undefined,
+          resolution: resolution as "low" | "medium" | "high" | undefined,
           downsampleToSeconds: downsample_to_seconds,
           format: format as "arrays" | "rows" | undefined,
           sportType,

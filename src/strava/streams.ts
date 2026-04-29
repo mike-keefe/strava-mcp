@@ -145,7 +145,6 @@ export async function fetchActivityStreams(
   const {
     activityId,
     streamTypes,
-    resolution = "all",
     downsampleToSeconds,
     format = "arrays",
     sportType,
@@ -154,6 +153,9 @@ export async function fetchActivityStreams(
     timeRangeSeconds,
     distanceRangeMeters,
   } = params;
+  // The user-facing `resolution` parameter is currently a no-op: Strava only
+  // accepts low | medium | high (rejects "all") and we always fetch high to
+  // populate the cache. Reduced fidelity should use downsample_to_seconds.
 
   const effectiveStreamTypes = streamTypes ?? defaultsForSport(sportType);
   const requestedTypes = effectiveStreamTypes.filter((t): t is StreamType =>
@@ -214,8 +216,9 @@ export async function fetchActivityStreams(
     );
   }
 
-  const resolutionReturned =
-    resolution === "all" ? "all" : (timeStream?.resolution ?? "high");
+  // Strava's response carries its own `resolution` field per stream; fall
+  // back to "high" when there's no time stream to read it from.
+  const resolutionReturned = slicedTimeStream?.resolution ?? timeStream?.resolution ?? "high";
 
   const resolvedUnits = resolveUnitsMode(units, sportType);
   const derivedTypes: string[] = [];
@@ -481,7 +484,10 @@ async function fetchStreamsForKeys(
   activityId: number,
   keys: StreamType[]
 ): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
-  const query = `?keys=${keys.join(",")}&resolution=all&series_type=time`;
+  // Strava's resolution parameter accepts low | medium | high — NOT "all"
+  // (which it 400s on). "high" returns full per-second fidelity. We always
+  // fetch high here and downsample server-side per the user's request.
+  const query = `?keys=${keys.join(",")}&resolution=high&series_type=time`;
   const response = await client.fetch(`/activities/${activityId}/streams${query}`);
   const streamsArray = (await response.json()) as RawStream[];
   const rawStreams = Object.fromEntries(streamsArray.map((s) => [s.type, s]));
@@ -523,7 +529,9 @@ async function fetchEffortStreamsForKeys(
   effortId: number,
   keys: StreamType[]
 ): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
-  const query = `?keys=${keys.join(",")}&resolution=all&series_type=time`;
+  // Same Strava limitation as activity streams: resolution must be one of
+  // low | medium | high. "high" preserves full fidelity.
+  const query = `?keys=${keys.join(",")}&resolution=high&series_type=time`;
   const response = await client.fetch(`/segment_efforts/${effortId}/streams${query}`);
   const json = (await response.json()) as RawStream[];
   const rawStreams = Object.fromEntries(json.map((s) => [s.type, s]));
