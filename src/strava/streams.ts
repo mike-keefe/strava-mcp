@@ -1,5 +1,9 @@
+import { StravaApiError } from "./client.js";
 import type { StravaClient } from "./client.js";
+import type { ActivityLap } from "./activity.js";
 import type { StreamType, StreamResolution } from "./types.js";
+
+export type StreamsUnitsMode = "raw" | "running" | "cycling" | "auto";
 
 export interface StreamsParams {
   activityId: number;
@@ -7,7 +11,20 @@ export interface StreamsParams {
   resolution?: StreamResolution;
   downsampleToSeconds?: number;
   format?: "arrays" | "rows";
+  sportType?: string;
+  units?: StreamsUnitsMode;
+  laps?: ActivityLap[];
+  // Inclusive elapsed-second range. Both endpoints optional; omitted means
+  // unbounded on that side.
+  timeRangeSeconds?: { start?: number; end?: number };
+  // Inclusive distance range in metres along the distance stream.
+  distanceRangeMeters?: { start?: number; end?: number };
 }
+
+// Anything below this in m/s (~ 22:13 / km) is treated as stopped for the
+// purpose of pace conversion. Without a floor, near-zero velocity samples
+// produce nonsense pace values; with one, paused sections come back as null.
+const PACE_VELOCITY_FLOOR_MS = 0.1;
 
 const DEFAULT_STREAM_TYPES: StreamType[] = [
   "time",
@@ -17,6 +34,32 @@ const DEFAULT_STREAM_TYPES: StreamType[] = [
   "altitude",
   "cadence",
 ];
+
+// Sport-aware default stream types. Avoids asking for watts on Runs (which
+// commonly don't have a power stream) and includes grade_smooth for outdoor
+// efforts where elevation matters. Used when the caller doesn't pass an
+// explicit stream_types list. The retry-without-watts fix in
+// fetchAllStreamsWithRetry still protects us when the device stream set
+// disagrees with what these defaults assume.
+export function defaultsForSport(sportType: string | undefined): StreamType[] {
+  switch (sportType) {
+    case "Run":
+    case "TrailRun":
+    case "Walk":
+    case "Hike":
+      return ["time", "distance", "heartrate", "velocity_smooth", "altitude", "cadence", "grade_smooth"];
+    case "Ride":
+    case "VirtualRide":
+    case "EBikeRide":
+    case "GravelRide":
+    case "MountainBikeRide":
+      return ["time", "distance", "heartrate", "velocity_smooth", "altitude", "cadence", "watts", "grade_smooth"];
+    case "Swim":
+      return ["time", "distance", "velocity_smooth", "cadence"];
+    default:
+      return DEFAULT_STREAM_TYPES;
+  }
+}
 
 const ALL_STREAM_TYPES: StreamType[] = [
   "time",
@@ -31,6 +74,15 @@ const ALL_STREAM_TYPES: StreamType[] = [
   "moving",
   "grade_smooth",
 ];
+
+// Streams that are commonly absent on consumer GPS watches. When Strava
+// returns a 400 for the full key list, we retry without these. The activity
+// summary's `device_watts: true` flag is misleading — it indicates *estimated*
+// watts on the summary, not the existence of a per-second watts stream. A
+// 400 is the only signal we get for "this stream type isn't recorded".
+const OPTIONAL_DEVICE_STREAMS: StreamType[] = ["watts", "temp"];
+
+const STREAMS_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 const GAP_THRESHOLD_SECONDS = 5;
 
@@ -50,8 +102,22 @@ interface GapLocation {
 
 interface StreamsMetadata {
   original_size: number;
+  // Number of samples after slicing but before downsampling.
+  sliced_size: number;
+  // Resolved [startIndex, endIndex] applied (inclusive) into the raw stream.
+  // Null when no slice was applied (whole-activity request).
+  sliced_index_range: [number, number] | null;
+  // Echo of the resolved time / distance bounds in their respective units.
+  sliced_time_seconds: { start: number; end: number } | null;
+  sliced_distance_meters: { start: number; end: number } | null;
   resolution_returned: string;
   downsampled_to_seconds: number | null;
+  requested_types: StreamType[];
+  returned_types: StreamType[];
+  unavailable_types: StreamType[];
+  units_mode: StreamsUnitsMode;
+  derived_types: string[];
+  // Legacy fields kept for backwards compat with existing consumers.
   stream_types_present: StreamType[];
   stream_types_missing: StreamType[];
   gap_count: number;
@@ -66,6 +132,11 @@ export interface StreamsResult {
   data: ArraysFormat | RowsFormat;
 }
 
+interface CachedStreams {
+  rawStreams: Record<string, RawStream>;
+  presentTypes: StreamType[];
+}
+
 export async function fetchActivityStreams(
   client: StravaClient,
   streamCache: KVNamespace,
@@ -73,77 +144,146 @@ export async function fetchActivityStreams(
 ): Promise<StreamsResult> {
   const {
     activityId,
-    streamTypes = DEFAULT_STREAM_TYPES,
-    resolution = "all",
+    streamTypes,
     downsampleToSeconds,
     format = "arrays",
+    sportType,
+    units = "auto",
+    laps,
+    timeRangeSeconds,
+    distanceRangeMeters,
   } = params;
+  // The user-facing `resolution` parameter is currently a no-op: Strava only
+  // accepts low | medium | high (rejects "all") and we always fetch high to
+  // populate the cache. Reduced fidelity should use downsample_to_seconds.
 
-  const requestedTypes = streamTypes.filter((t): t is StreamType =>
+  const effectiveStreamTypes = streamTypes ?? defaultsForSport(sportType);
+  const requestedTypes = effectiveStreamTypes.filter((t): t is StreamType =>
     ALL_STREAM_TYPES.includes(t)
   );
 
-  // Fetch raw streams — cache by activity ID (activities are immutable)
+  // Per-activity cache (activities are immutable). The cached payload always
+  // contains the full safe stream set Strava actually returned; we filter to
+  // the user's requested types on the way out.
   const cacheKey = `streams:${activityId}:all`;
-  let rawStreams: Record<string, RawStream>;
+  const cached = await readCachedStreams(streamCache, cacheKey);
 
-  const cached = await streamCache.get(cacheKey);
+  let rawStreams: Record<string, RawStream>;
+  let presentInPayload: StreamType[];
+
   if (cached) {
-    rawStreams = JSON.parse(cached) as Record<string, RawStream>;
+    rawStreams = cached.rawStreams;
+    presentInPayload = cached.presentTypes;
   } else {
-    const keys = ALL_STREAM_TYPES.join(",");
-    const query = `?keys=${keys}&resolution=all&series_type=time`;
-    const response = await client.fetch(`/activities/${activityId}/streams${query}`);
-    if (!response.ok) {
-      throw Object.assign(new Error(`Strava API error: ${response.status}`), {
-        status: response.status,
-      });
-    }
-    const streamsArray = (await response.json()) as RawStream[];
-    rawStreams = Object.fromEntries(streamsArray.map((s) => [s.type, s]));
-    await streamCache.put(cacheKey, JSON.stringify(rawStreams), {
-      expirationTtl: 30 * 24 * 60 * 60,
+    const fetched = await fetchAllStreamsWithRetry(client, activityId);
+    rawStreams = fetched.rawStreams;
+    presentInPayload = fetched.presentTypes;
+
+    const cacheValue: CachedStreams = { rawStreams, presentTypes: presentInPayload };
+    await streamCache.put(cacheKey, JSON.stringify(cacheValue), {
+      expirationTtl: STREAMS_CACHE_TTL_SECONDS,
     });
   }
 
-  const presentTypes = requestedTypes.filter((t) => rawStreams[t] !== undefined);
-  const missingTypes = requestedTypes.filter((t) => rawStreams[t] === undefined);
+  // Anything the user asked for that isn't in the cached payload is
+  // unavailable upstream — surface it in metadata, do not re-fetch.
+  const returnedTypes = requestedTypes.filter((t) => rawStreams[t] !== undefined);
+  const unavailableTypes = requestedTypes.filter((t) => rawStreams[t] === undefined);
 
   const timeStream = rawStreams["time"];
   const originalSize = timeStream?.data?.length ?? 0;
 
-  // Detect gaps in the time stream
-  const { gapCount, gapLocations } = detectGaps(timeStream?.data as number[] | undefined);
+  // Resolve slice indices BEFORE gap detection / downsampling so that
+  // detection and any later derivation only see the requested window. The
+  // underlying rawStreams (and cache) are unchanged — sliceStreams returns a
+  // new map of windowed arrays.
+  const slice = computeSliceIndices(rawStreams, timeRangeSeconds, distanceRangeMeters, originalSize);
+  const slicedRawStreams =
+    slice.applied && originalSize > 0
+      ? sliceStreams(rawStreams, presentInPayload, slice.start, slice.end)
+      : rawStreams;
+  const slicedTimeStream = slicedRawStreams["time"];
+  const slicedSize = slicedTimeStream?.data?.length ?? originalSize;
 
-  // Downsample if requested
+  const { gapCount, gapLocations } = detectGaps(slicedTimeStream?.data as number[] | undefined);
+
   let outputData: Record<string, (number | number[] | boolean | null)[]>;
-  if (downsampleToSeconds && downsampleToSeconds > 1 && timeStream) {
-    outputData = downsample(rawStreams, presentTypes, downsampleToSeconds);
+  if (downsampleToSeconds && downsampleToSeconds > 1 && slicedTimeStream) {
+    outputData = downsample(slicedRawStreams, returnedTypes, downsampleToSeconds);
   } else {
     outputData = Object.fromEntries(
-      presentTypes.map((t) => [t, rawStreams[t].data as (number | number[] | boolean | null)[]])
+      returnedTypes.map((t) => [t, slicedRawStreams[t].data as (number | number[] | boolean | null)[]])
     );
   }
 
-  const resolutionReturned =
-    resolution === "all" ? "all" : (timeStream?.resolution ?? "high");
+  // Strava's response carries its own `resolution` field per stream; fall
+  // back to "high" when there's no time stream to read it from.
+  const resolutionReturned = slicedTimeStream?.resolution ?? timeStream?.resolution ?? "high";
+
+  const resolvedUnits = resolveUnitsMode(units, sportType);
+  const derivedTypes: string[] = [];
+
+  if (laps && laps.length > 0 && outputData["time"]) {
+    const timeArr = outputData["time"] as (number | null)[];
+    outputData["lap_index"] = computeLapIndex(timeArr, laps);
+    derivedTypes.push("lap_index");
+  }
+
+  if (resolvedUnits !== "raw" && returnedTypes.includes("velocity_smooth")) {
+    const velocity = outputData["velocity_smooth"] as (number | null)[];
+    if (resolvedUnits === "running") {
+      outputData["pace_per_km"] = velocity.map((v) =>
+        v !== null && typeof v === "number" && v > PACE_VELOCITY_FLOOR_MS ? 1000 / v : null
+      );
+      derivedTypes.push("pace_per_km");
+    } else if (resolvedUnits === "cycling") {
+      outputData["speed_kmh"] = velocity.map((v) =>
+        v !== null && typeof v === "number" ? v * 3.6 : null
+      );
+      derivedTypes.push("speed_kmh");
+    }
+  }
+
+  const sliceTimeBounds = slice.applied
+    ? {
+        start: (timeStream?.data?.[slice.start] as number | undefined) ?? slice.start,
+        end: (timeStream?.data?.[slice.end] as number | undefined) ?? slice.end,
+      }
+    : null;
+  const distanceStream = rawStreams["distance"];
+  const sliceDistanceBounds = slice.applied && distanceStream
+    ? {
+        start: (distanceStream.data[slice.start] as number | undefined) ?? 0,
+        end: (distanceStream.data[slice.end] as number | undefined) ?? 0,
+      }
+    : null;
 
   const metadata: StreamsMetadata = {
     original_size: originalSize,
+    sliced_size: slicedSize,
+    sliced_index_range: slice.applied ? [slice.start, slice.end] : null,
+    sliced_time_seconds: sliceTimeBounds,
+    sliced_distance_meters: sliceDistanceBounds,
     resolution_returned: resolutionReturned,
     downsampled_to_seconds: downsampleToSeconds ?? null,
-    stream_types_present: presentTypes,
-    stream_types_missing: missingTypes,
+    requested_types: requestedTypes,
+    returned_types: returnedTypes,
+    unavailable_types: unavailableTypes,
+    units_mode: resolvedUnits,
+    derived_types: derivedTypes,
+    stream_types_present: returnedTypes,
+    stream_types_missing: unavailableTypes,
     gap_count: gapCount,
     gap_locations: gapLocations,
   };
 
   if (format === "rows") {
-    const length = outputData["time"]?.length ?? outputData[presentTypes[0]]?.length ?? 0;
+    const length = outputData["time"]?.length ?? outputData[returnedTypes[0]]?.length ?? 0;
+    const allKeys = [...returnedTypes, ...derivedTypes];
     const rows: RowsFormat = [];
     for (let i = 0; i < length; i++) {
       const row: Record<string, number | number[] | boolean | null> = {};
-      for (const t of presentTypes) {
+      for (const t of allKeys) {
         row[t] = (outputData[t]?.[i] ?? null) as number | number[] | boolean | null;
       }
       rows.push(row);
@@ -152,6 +292,253 @@ export async function fetchActivityStreams(
   }
 
   return { metadata, data: outputData };
+}
+
+// Resolves a [startIndex, endIndex] window into the raw stream from optional
+// time-second bounds, distance-metre bounds, or both. Falls back to the full
+// stream when nothing is requested. When both ranges are given, we take the
+// intersection (the tightest window). Inclusive on both ends.
+function computeSliceIndices(
+  rawStreams: Record<string, RawStream>,
+  timeRange: { start?: number; end?: number } | undefined,
+  distanceRange: { start?: number; end?: number } | undefined,
+  totalSize: number
+): { start: number; end: number; applied: boolean } {
+  if (totalSize === 0 || (!timeRange && !distanceRange)) {
+    return { start: 0, end: totalSize - 1, applied: false };
+  }
+  let start = 0;
+  let end = totalSize - 1;
+
+  const timeData = rawStreams["time"]?.data as number[] | undefined;
+  if (timeRange && timeData && timeData.length > 0) {
+    if (timeRange.start !== undefined) {
+      const found = lowerBound(timeData, timeRange.start);
+      if (found > start) start = found;
+    }
+    if (timeRange.end !== undefined) {
+      const found = upperBound(timeData, timeRange.end);
+      if (found < end) end = found;
+    }
+  }
+
+  const distanceData = rawStreams["distance"]?.data as number[] | undefined;
+  if (distanceRange && distanceData && distanceData.length > 0) {
+    if (distanceRange.start !== undefined) {
+      const found = lowerBound(distanceData, distanceRange.start);
+      if (found > start) start = found;
+    }
+    if (distanceRange.end !== undefined) {
+      const found = upperBound(distanceData, distanceRange.end);
+      if (found < end) end = found;
+    }
+  }
+
+  if (end < start) {
+    // Empty window — pin to a 1-sample slice to avoid empty arrays.
+    end = start;
+  }
+
+  return { start, end, applied: true };
+}
+
+// First index where data[i] >= target. Linear scan; streams are at most a
+// few thousand points so this is fine and avoids assuming monotonicity at
+// the binary-search level (gaps are common).
+function lowerBound(data: number[], target: number): number {
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] >= target) return i;
+  }
+  return data.length - 1;
+}
+
+// Last index where data[i] <= target.
+function upperBound(data: number[], target: number): number {
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i] <= target) return i;
+  }
+  return 0;
+}
+
+function sliceStreams(
+  rawStreams: Record<string, RawStream>,
+  types: StreamType[],
+  start: number,
+  end: number
+): Record<string, RawStream> {
+  const out: Record<string, RawStream> = {};
+  for (const t of types) {
+    const stream = rawStreams[t];
+    if (!stream) continue;
+    out[t] = {
+      ...stream,
+      data: stream.data.slice(start, end + 1),
+    };
+  }
+  return out;
+}
+
+// Builds an array, the same length as `time`, where each element is the
+// 0-based index of the lap that sample falls within. We work in elapsed
+// seconds (the time stream's units) rather than start_index/end_index from
+// Strava, because those refer to the original raw stream and don't survive
+// downsampling. Samples that don't fall in any lap come back as null —
+// shouldn't happen in practice, but better than asserting.
+export function computeLapIndex(
+  timeArr: (number | null)[],
+  laps: ActivityLap[]
+): (number | null)[] {
+  // Build [startSec, endSec] per lap from cumulative elapsed_time, sorted by
+  // lap_index so out-of-order results from Strava don't cause issues.
+  const sorted = [...laps].sort((a, b) => a.lap_index - b.lap_index);
+  const bounds: { start: number; end: number }[] = [];
+  let cursor = 0;
+  for (const lap of sorted) {
+    const start = cursor;
+    const end = start + (lap.elapsed_time ?? 0);
+    bounds.push({ start, end });
+    cursor = end;
+  }
+
+  return timeArr.map((t) => {
+    if (t === null || typeof t !== "number") return null;
+    for (let i = 0; i < bounds.length; i++) {
+      if (t >= bounds[i].start && t < bounds[i].end) return i;
+    }
+    // Edge case: the very last sample lands exactly on the final boundary.
+    if (bounds.length > 0 && t >= bounds[bounds.length - 1].end) {
+      return bounds.length - 1;
+    }
+    return null;
+  });
+}
+
+function resolveUnitsMode(
+  units: StreamsUnitsMode,
+  sportType: string | undefined
+): StreamsUnitsMode {
+  if (units !== "auto") return units;
+  switch (sportType) {
+    case "Run":
+    case "TrailRun":
+    case "Walk":
+    case "Hike":
+      return "running";
+    case "Ride":
+    case "VirtualRide":
+    case "EBikeRide":
+    case "GravelRide":
+    case "MountainBikeRide":
+      return "cycling";
+    default:
+      return "raw";
+  }
+}
+
+// Reads the streams cache, tolerating both the new {rawStreams, presentTypes}
+// shape and legacy entries that stored only the rawStreams map directly.
+async function readCachedStreams(
+  streamCache: KVNamespace,
+  cacheKey: string
+): Promise<CachedStreams | null> {
+  const raw = await streamCache.get(cacheKey);
+  if (!raw) return null;
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    "rawStreams" in parsed &&
+    "presentTypes" in parsed
+  ) {
+    const c = parsed as CachedStreams;
+    return { rawStreams: c.rawStreams, presentTypes: c.presentTypes };
+  }
+  // Legacy entry — derive presentTypes from the keys.
+  const legacy = parsed as Record<string, RawStream>;
+  return {
+    rawStreams: legacy,
+    presentTypes: Object.keys(legacy) as StreamType[],
+  };
+}
+
+// Fetches the full stream set from Strava, retrying once on 400 with watts
+// and temp removed (these are commonly absent on GPS watches without a power
+// meter or thermometer).
+async function fetchAllStreamsWithRetry(
+  client: StravaClient,
+  activityId: number
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  try {
+    return await fetchStreamsForKeys(client, activityId, ALL_STREAM_TYPES);
+  } catch (err) {
+    if (!(err instanceof StravaApiError) || err.status !== 400) {
+      throw err;
+    }
+    const safeKeys = ALL_STREAM_TYPES.filter((k) => !OPTIONAL_DEVICE_STREAMS.includes(k));
+    return fetchStreamsForKeys(client, activityId, safeKeys);
+  }
+}
+
+async function fetchStreamsForKeys(
+  client: StravaClient,
+  activityId: number,
+  keys: StreamType[]
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  // Strava's resolution parameter accepts low | medium | high — NOT "all"
+  // (which it 400s on). "high" returns full per-second fidelity. We always
+  // fetch high here and downsample server-side per the user's request.
+  const query = `?keys=${keys.join(",")}&resolution=high&series_type=time`;
+  const response = await client.fetch(`/activities/${activityId}/streams${query}`);
+  const streamsArray = (await response.json()) as RawStream[];
+  const rawStreams = Object.fromEntries(streamsArray.map((s) => [s.type, s]));
+  return {
+    rawStreams,
+    presentTypes: Object.keys(rawStreams) as StreamType[],
+  };
+}
+
+// Fetches segment effort streams. Strava's `/segment_efforts/:id/streams`
+// endpoint accepts a `keys` parameter and, like activities, returns 400 if
+// any requested key isn't recorded for that effort. We retry once with watts
+// and temp removed.
+export async function fetchSegmentEffortStreams(
+  client: StravaClient,
+  effortId: number,
+  keys: StreamType[]
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  try {
+    return await fetchEffortStreamsForKeys(client, effortId, keys);
+  } catch (err) {
+    if (!(err instanceof StravaApiError) || err.status !== 400) {
+      throw err;
+    }
+    const requestedOptionalKeys = keys.filter((k) => OPTIONAL_DEVICE_STREAMS.includes(k));
+    if (requestedOptionalKeys.length === 0) {
+      throw err;
+    }
+    const safeKeys = keys.filter((k) => !OPTIONAL_DEVICE_STREAMS.includes(k));
+    if (safeKeys.length === 0) {
+      throw err;
+    }
+    return fetchEffortStreamsForKeys(client, effortId, safeKeys);
+  }
+}
+
+async function fetchEffortStreamsForKeys(
+  client: StravaClient,
+  effortId: number,
+  keys: StreamType[]
+): Promise<{ rawStreams: Record<string, RawStream>; presentTypes: StreamType[] }> {
+  // Same Strava limitation as activity streams: resolution must be one of
+  // low | medium | high. "high" preserves full fidelity.
+  const query = `?keys=${keys.join(",")}&resolution=high&series_type=time`;
+  const response = await client.fetch(`/segment_efforts/${effortId}/streams${query}`);
+  const json = (await response.json()) as RawStream[];
+  const rawStreams = Object.fromEntries(json.map((s) => [s.type, s]));
+  return {
+    rawStreams,
+    presentTypes: Object.keys(rawStreams) as StreamType[],
+  };
 }
 
 function detectGaps(

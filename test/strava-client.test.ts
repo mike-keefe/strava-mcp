@@ -221,7 +221,7 @@ describe("StravaClient.fetch", () => {
     );
   });
 
-  it("throws on 401 without retrying a second time", async () => {
+  it("throws StravaApiError on 401 after a retry without retrying again", async () => {
     const cachedToken = JSON.stringify({ access_token: "stale-token", expires_at: FUTURE_EXPIRES_AT });
     const kv = makeKv({ "strava:access_token": cachedToken });
     const client = new StravaClient(makeEnv(kv));
@@ -233,9 +233,160 @@ describe("StravaClient.fetch", () => {
 
     vi.stubGlobal("fetch", mockFetch);
 
-    // On second 401 (isRetry=true) the response is returned as-is (not thrown)
-    const response = await client.fetch("/athlete");
-    expect(response.status).toBe(401);
+    const err = await client.fetch("/athlete").catch((e) => e);
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(401);
     expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  // ---------------------------------------------------------------------------
+  // A2 — upstream Strava error bodies are surfaced
+  // ---------------------------------------------------------------------------
+
+  it("includes parsed JSON body on a non-OK response", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    const errorBody = {
+      message: "Bad Request",
+      errors: [{ resource: "Stream", field: "watts", code: "invalid" }],
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(apiResponse(errorBody, 400)));
+
+    const err = await client.fetch("/activities/1/streams").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(400);
+    expect(err.body).toEqual(errorBody);
+    expect(err.message).toContain("watts");
+    expect(err.message).toContain("invalid");
+  });
+
+  it("includes raw text body when response body is not JSON", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("Internal Server Error — html page here", { status: 502 })
+      )
+    );
+
+    const err = await client.fetch("/athlete").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(502);
+    expect(err.body).toBe("Internal Server Error — html page here");
+    expect(err.message).toContain("Internal Server Error");
+  });
+
+  it("does not crash when error body is empty", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 403 })));
+
+    const err = await client.fetch("/athlete").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(403);
+  });
+
+  it("includes parsed body on 429 rate limit responses", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    const resetAt = NOW_SECONDS + 30;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        apiResponse(
+          { message: "Rate Limit Exceeded", errors: [] },
+          429,
+          { "X-RateLimit-Reset": String(resetAt) }
+        )
+      )
+    );
+
+    const err = await client.fetch("/athlete").catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect(err.status).toBe(429);
+    expect(err.retryAfterSeconds).toBe(30);
+    expect((err.body as { message: string }).message).toBe("Rate Limit Exceeded");
+  });
+
+  // ---------------------------------------------------------------------------
+  // D1 — structured logging from the client wrapper
+  // ---------------------------------------------------------------------------
+
+  it("logs status and duration on successful calls", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(apiResponse({}, 200, rateLimitHeaders())));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await client.fetch("/athlete");
+
+    const lines = logSpy.mock.calls.map((c) => c[0] as string).filter((l) => typeof l === "string");
+    const responseLine = lines.find((l) => l.includes("strava.response"));
+    expect(responseLine).toBeDefined();
+    const parsed = JSON.parse(responseLine!);
+    expect(parsed.status).toBe(200);
+    expect(typeof parsed.duration_ms).toBe("number");
+    expect(parsed.method).toBe("GET");
+  });
+
+  it("logs the parsed body on non-OK responses", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    const errorBody = { message: "Bad", errors: [{ code: "invalid", field: "watts" }] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(apiResponse(errorBody, 400)));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await client.fetch("/activities/1/streams").catch(() => {});
+
+    const lines = logSpy.mock.calls.map((c) => c[0] as string);
+    const errorLine = lines.find((l) => l.includes("strava.response") && l.includes("400"));
+    expect(errorLine).toBeDefined();
+    expect(errorLine).toContain("invalid");
+    expect(errorLine).toContain("watts");
+  });
+
+  it("does not log auth tokens or client secrets even if accidentally included", async () => {
+    const cachedToken = JSON.stringify({ access_token: "leak-token-12345", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const env = makeEnv(kv);
+    env.STRAVA_CLIENT_SECRET = "leak-secret-67890";
+    const client = new StravaClient(env);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(apiResponse({}, 200)));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await client.fetch("/athlete");
+
+    const allOutput = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(allOutput).not.toContain("leak-token-12345");
+    expect(allOutput).not.toContain("leak-secret-67890");
+  });
+
+  // ---------------------------------------------------------------------------
+  // D3 — rate limit persistence to KV
+  // ---------------------------------------------------------------------------
+
+  it("persists rate-limit headers to TOKEN_CACHE under rate_limit:latest", async () => {
+    const cachedToken = JSON.stringify({ access_token: "cached-token", expires_at: FUTURE_EXPIRES_AT });
+    const kv = makeKv({ "strava:access_token": cachedToken });
+    const client = new StravaClient(makeEnv(kv));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(apiResponse({}, 200, rateLimitHeaders())));
+
+    await client.fetch("/athlete");
+
+    expect(kv.put).toHaveBeenCalledWith(
+      "rate_limit:latest",
+      expect.stringContaining('"shortTermLimit":100')
+    );
   });
 });

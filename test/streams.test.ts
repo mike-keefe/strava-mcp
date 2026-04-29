@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { fetchActivityStreams } from "../src/strava/streams.js";
+import { StravaApiError } from "../src/strava/client.js";
 import type { StravaClient } from "../src/strava/client.js";
 
 function makeKv(initial: Record<string, string> = {}): KVNamespace {
@@ -142,6 +143,179 @@ describe("fetchActivityStreams", () => {
     });
     expect(result.metadata.original_size).toBe(n);
     expect((result.data as Record<string, unknown[]>)["time"]).toHaveLength(n);
+  });
+
+  // ---------------------------------------------------------------------------
+  // A1 — retry on 400 with watts and temp removed (Run with no power meter)
+  // ---------------------------------------------------------------------------
+
+  it("retries without watts and temp when Strava returns 400", async () => {
+    const fixture = makeStreams();
+    const client = {
+      fetch: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new StravaApiError(400, "Strava API error (400): bad watts", false, undefined, {
+            errors: [{ resource: "Stream", field: "watts", code: "invalid" }],
+          })
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify(fixture), { status: 200 })
+        ),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+    const kv = makeKv();
+
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 18311335874,
+      streamTypes: ["time", "distance", "heartrate"],
+    });
+
+    expect((client.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
+    const firstCallPath = (client.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    const secondCallPath = (client.fetch as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(firstCallPath).toContain("watts");
+    expect(secondCallPath).not.toContain("watts");
+    expect(secondCallPath).not.toContain("temp");
+    expect(result.metadata.returned_types).toContain("time");
+    expect(result.metadata.unavailable_types).not.toContain("time");
+  });
+
+  it("re-throws the 400 with body when the retry without watts also fails", async () => {
+    const errorBody = {
+      message: "Bad Request",
+      errors: [{ resource: "Activity", field: "id", code: "invalid" }],
+    };
+    const client = {
+      fetch: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new StravaApiError(400, "Strava API error (400): first", false, undefined, errorBody)
+        )
+        .mockRejectedValueOnce(
+          new StravaApiError(400, "Strava API error (400): second", false, undefined, errorBody)
+        ),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+    const kv = makeKv();
+
+    const err = await fetchActivityStreams(client, kv, {
+      activityId: 1,
+      streamTypes: ["time"],
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect((err as StravaApiError).status).toBe(400);
+    expect((err as StravaApiError).body).toEqual(errorBody);
+  });
+
+  it("does not catch non-400 errors during the upstream fetch", async () => {
+    const client = {
+      fetch: vi.fn().mockRejectedValue(new StravaApiError(503, "server error", true)),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+    const kv = makeKv();
+
+    const err = await fetchActivityStreams(client, kv, { activityId: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(StravaApiError);
+    expect((err as StravaApiError).status).toBe(503);
+    // No retry should have happened
+    expect((client.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // B1-B3 — request-aware filtering, cache shape, availability metadata
+  // ---------------------------------------------------------------------------
+
+  it("cache hit filters output to requested types and reports them in metadata", async () => {
+    // Cache value contains the full payload from a previous call
+    const fullPayload = {
+      rawStreams: {
+        time: { type: "time", data: [0, 1, 2], series_type: "time", original_size: 3, resolution: "high" },
+        distance: { type: "distance", data: [0, 5, 10], series_type: "time", original_size: 3, resolution: "high" },
+        heartrate: { type: "heartrate", data: [120, 121, 122], series_type: "time", original_size: 3, resolution: "high" },
+        cadence: { type: "cadence", data: [80, 81, 82], series_type: "time", original_size: 3, resolution: "high" },
+      },
+      presentTypes: ["time", "distance", "heartrate", "cadence"],
+    };
+    const kv = makeKv({ "streams:42:all": JSON.stringify(fullPayload) });
+    const client = {
+      fetch: vi.fn(),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 42,
+      streamTypes: ["time", "heartrate"],
+    });
+
+    expect((client.fetch as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    const data = result.data as Record<string, unknown[]>;
+    expect(Object.keys(data).sort()).toEqual(["heartrate", "time"]);
+    expect(result.metadata.requested_types).toEqual(["time", "heartrate"]);
+    expect(result.metadata.returned_types).toEqual(["time", "heartrate"]);
+    expect(result.metadata.unavailable_types).toEqual([]);
+  });
+
+  it("cache miss writes the new {rawStreams, presentTypes} cache shape", async () => {
+    const fixture = makeStreams();
+    const client = makeClient(fixture);
+    const kv = makeKv();
+
+    await fetchActivityStreams(client, kv, { activityId: 99 });
+
+    expect(kv.put).toHaveBeenCalledTimes(1);
+    const cachedRaw = (kv.put as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    const parsed = JSON.parse(cachedRaw) as { rawStreams?: unknown; presentTypes?: string[] };
+    expect(parsed.rawStreams).toBeDefined();
+    expect(parsed.presentTypes).toEqual(expect.arrayContaining(["time", "distance", "heartrate"]));
+  });
+
+  it("reads legacy cache entries (no presentTypes field) by deriving from data keys", async () => {
+    // Legacy format: just the rawStreams map directly
+    const legacy = {
+      time: { type: "time", data: [0, 1, 2], series_type: "time", original_size: 3, resolution: "high" },
+      distance: { type: "distance", data: [0, 5, 10], series_type: "time", original_size: 3, resolution: "high" },
+    };
+    const kv = makeKv({ "streams:7:all": JSON.stringify(legacy) });
+    const client = {
+      fetch: vi.fn(),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 7,
+      streamTypes: ["time", "distance"],
+    });
+
+    expect((client.fetch as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(result.metadata.returned_types).toEqual(["time", "distance"]);
+  });
+
+  it("reports unavailable_types and does NOT re-fetch when a requested type isn't cached", async () => {
+    // Cached payload from a previous call doesn't have watts (Run from a watch
+    // without a power meter). User now asks for watts.
+    const cached = {
+      rawStreams: {
+        time: { type: "time", data: [0, 1, 2], series_type: "time", original_size: 3, resolution: "high" },
+        heartrate: { type: "heartrate", data: [120, 121, 122], series_type: "time", original_size: 3, resolution: "high" },
+      },
+      presentTypes: ["time", "heartrate"],
+    };
+    const kv = makeKv({ "streams:55:all": JSON.stringify(cached) });
+    const client = {
+      fetch: vi.fn(),
+      lastRateLimitInfo: null,
+    } as unknown as StravaClient;
+
+    const result = await fetchActivityStreams(client, kv, {
+      activityId: 55,
+      streamTypes: ["time", "heartrate", "watts"],
+    });
+
+    expect((client.fetch as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(result.metadata.unavailable_types).toContain("watts");
+    expect(result.metadata.returned_types).not.toContain("watts");
   });
 
   it("preserves nulls in downsampled output", async () => {
