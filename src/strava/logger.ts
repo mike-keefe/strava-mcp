@@ -41,7 +41,8 @@ export class Logger {
 
   private log(level: LogLevel, event: string, fields: Record<string, unknown>): void {
     if (LEVEL_RANK[level] < this.minRank) return;
-    const payload = { level, event, ...redact(fields) };
+    const redactedFields = redact(fields) as Record<string, unknown>;
+    const payload = { level, event, ...redactedFields };
     try {
       console.log(JSON.stringify(payload));
     } catch {
