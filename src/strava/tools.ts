@@ -157,14 +157,20 @@ export function registerStravaTools(
         .enum(["arrays", "rows"])
         .optional()
         .describe("'arrays' (default, Strava native) or 'rows' (one object per second)"),
+      units: z
+        .enum(["raw", "running", "cycling", "auto"])
+        .optional()
+        .describe(
+          "Units mode. 'auto' (default) derives from sport_type: pace_per_km for runs, speed_kmh for rides. 'raw' keeps only velocity_smooth in m/s."
+        ),
     },
-    async ({ activity_id, stream_types, resolution, downsample_to_seconds, format }) => {
+    async ({ activity_id, stream_types, resolution, downsample_to_seconds, format, units }) => {
       try {
-        // When no stream_types is supplied, fetch the activity summary so we
-        // can pick sport-aware defaults (e.g. don't ask for watts on a Run).
-        // The summary is cached, so this is cheap on repeat calls.
+        // Sport-aware defaults and 'auto' units mode both need sport_type. The
+        // summary is cached, so this is cheap on repeat calls.
+        const needSummary = !stream_types || !units || units === "auto";
         let sportType: string | undefined;
-        if (!stream_types) {
+        if (needSummary) {
           try {
             const summary = await fetchActivitySummary(client, streamCache, activity_id);
             sportType = summary.sport_type ?? summary.type;
@@ -179,6 +185,7 @@ export function registerStravaTools(
           downsampleToSeconds: downsample_to_seconds,
           format: format as "arrays" | "rows" | undefined,
           sportType,
+          units: units as "raw" | "running" | "cycling" | "auto" | undefined,
         });
         return ok(result);
       } catch (err) {

@@ -2,6 +2,8 @@ import { StravaApiError } from "./client.js";
 import type { StravaClient } from "./client.js";
 import type { StreamType, StreamResolution } from "./types.js";
 
+export type StreamsUnitsMode = "raw" | "running" | "cycling" | "auto";
+
 export interface StreamsParams {
   activityId: number;
   streamTypes?: StreamType[];
@@ -9,7 +11,13 @@ export interface StreamsParams {
   downsampleToSeconds?: number;
   format?: "arrays" | "rows";
   sportType?: string;
+  units?: StreamsUnitsMode;
 }
+
+// Anything below this in m/s (~ 22:13 / km) is treated as stopped for the
+// purpose of pace conversion. Without a floor, near-zero velocity samples
+// produce nonsense pace values; with one, paused sections come back as null.
+const PACE_VELOCITY_FLOOR_MS = 0.1;
 
 const DEFAULT_STREAM_TYPES: StreamType[] = [
   "time",
@@ -92,6 +100,8 @@ interface StreamsMetadata {
   requested_types: StreamType[];
   returned_types: StreamType[];
   unavailable_types: StreamType[];
+  units_mode: StreamsUnitsMode;
+  derived_types: string[];
   // Legacy fields kept for backwards compat with existing consumers.
   stream_types_present: StreamType[];
   stream_types_missing: StreamType[];
@@ -124,6 +134,7 @@ export async function fetchActivityStreams(
     downsampleToSeconds,
     format = "arrays",
     sportType,
+    units = "auto",
   } = params;
 
   const effectiveStreamTypes = streamTypes ?? defaultsForSport(sportType);
@@ -176,6 +187,23 @@ export async function fetchActivityStreams(
   const resolutionReturned =
     resolution === "all" ? "all" : (timeStream?.resolution ?? "high");
 
+  const resolvedUnits = resolveUnitsMode(units, sportType);
+  const derivedTypes: string[] = [];
+  if (resolvedUnits !== "raw" && returnedTypes.includes("velocity_smooth")) {
+    const velocity = outputData["velocity_smooth"] as (number | null)[];
+    if (resolvedUnits === "running") {
+      outputData["pace_per_km"] = velocity.map((v) =>
+        v !== null && typeof v === "number" && v > PACE_VELOCITY_FLOOR_MS ? 1000 / v : null
+      );
+      derivedTypes.push("pace_per_km");
+    } else if (resolvedUnits === "cycling") {
+      outputData["speed_kmh"] = velocity.map((v) =>
+        v !== null && typeof v === "number" ? v * 3.6 : null
+      );
+      derivedTypes.push("speed_kmh");
+    }
+  }
+
   const metadata: StreamsMetadata = {
     original_size: originalSize,
     resolution_returned: resolutionReturned,
@@ -183,6 +211,8 @@ export async function fetchActivityStreams(
     requested_types: requestedTypes,
     returned_types: returnedTypes,
     unavailable_types: unavailableTypes,
+    units_mode: resolvedUnits,
+    derived_types: derivedTypes,
     stream_types_present: returnedTypes,
     stream_types_missing: unavailableTypes,
     gap_count: gapCount,
@@ -191,10 +221,11 @@ export async function fetchActivityStreams(
 
   if (format === "rows") {
     const length = outputData["time"]?.length ?? outputData[returnedTypes[0]]?.length ?? 0;
+    const allKeys = [...returnedTypes, ...derivedTypes];
     const rows: RowsFormat = [];
     for (let i = 0; i < length; i++) {
       const row: Record<string, number | number[] | boolean | null> = {};
-      for (const t of returnedTypes) {
+      for (const t of allKeys) {
         row[t] = (outputData[t]?.[i] ?? null) as number | number[] | boolean | null;
       }
       rows.push(row);
@@ -203,6 +234,28 @@ export async function fetchActivityStreams(
   }
 
   return { metadata, data: outputData };
+}
+
+function resolveUnitsMode(
+  units: StreamsUnitsMode,
+  sportType: string | undefined
+): StreamsUnitsMode {
+  if (units !== "auto") return units;
+  switch (sportType) {
+    case "Run":
+    case "TrailRun":
+    case "Walk":
+    case "Hike":
+      return "running";
+    case "Ride":
+    case "VirtualRide":
+    case "EBikeRide":
+    case "GravelRide":
+    case "MountainBikeRide":
+      return "cycling";
+    default:
+      return "raw";
+  }
 }
 
 // Reads the streams cache, tolerating both the new {rawStreams, presentTypes}
