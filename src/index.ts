@@ -18,7 +18,7 @@ function rateLimitedResponse(): Response {
 function buildMcpServer(env: Env, userOAuthToken?: string): McpServer {
   const server = new McpServer({ name: "strava-mcp", version: "0.1.0" });
   const client = new StravaClient(env, userOAuthToken);
-  registerStravaTools(server, client, env.STREAM_CACHE);
+  registerStravaTools(server, client, env);
   return server;
 }
 

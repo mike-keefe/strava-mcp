@@ -1,11 +1,21 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StravaApiError } from "./client.js";
+import { StravaApiError, RATE_LIMIT_KV_KEY } from "./client.js";
 import type { StravaClient } from "./client.js";
 import { handleStravaError, assertOk } from "./errors.js";
 import { fetchActivityStreams, fetchSegmentEffortStreams } from "./streams.js";
 import { fetchActivitySummary, fetchActivityLaps } from "./activity.js";
 import type { StreamType } from "./types.js";
+import type { Env } from "../types.js";
+
+// Worker version surfaced by the health tool. Updated by hand when the
+// package version changes — Wrangler doesn't bake package.json into the
+// bundle so we keep this as a constant.
+const WORKER_VERSION = "0.1.0";
+
+const ATHLETE_PROFILE_CACHE_KEY = "health:athlete_profile";
+const ATHLETE_PROFILE_TTL_SECONDS = 24 * 60 * 60;
+const KV_LIST_LIMIT = 1000;
 
 function ok(data: unknown): { content: [{ type: "text"; text: string }] } {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -52,8 +62,10 @@ export async function fetchFilteredActivities(
 export function registerStravaTools(
   server: McpServer,
   client: StravaClient,
-  streamCache: KVNamespace
+  env: Env
 ): void {
+  const streamCache = env.STREAM_CACHE;
+  const tokenCache = env.TOKEN_CACHE;
   // Issue #3 — get_athlete_profile
   server.tool(
     "get_athlete_profile",
@@ -474,4 +486,101 @@ export function registerStravaTools(
       }
     }
   );
+
+  // D2 — health: deployment + cache + rate-limit snapshot for diagnostics.
+  server.tool(
+    "health",
+    "Worker diagnostics: athlete identity, last seen Strava rate limit, cached entry counts, and worker version. Reach for this first when something seems off.",
+    {},
+    async () => {
+      try {
+        const athlete = await readAthleteProfile(client, tokenCache);
+        const rateLimit = await readLatestRateLimit(tokenCache);
+        const cacheStats = await readCacheStats(streamCache);
+        return ok({
+          worker_version: WORKER_VERSION,
+          athlete,
+          rate_limit: rateLimit,
+          cache: cacheStats,
+        });
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+}
+
+interface HealthAthlete {
+  id: number | null;
+  username: string | null;
+  firstname?: string;
+  lastname?: string;
+}
+
+async function readAthleteProfile(
+  client: StravaClient,
+  tokenCache: KVNamespace
+): Promise<HealthAthlete> {
+  const cached = await tokenCache.get(ATHLETE_PROFILE_CACHE_KEY);
+  if (cached) {
+    return JSON.parse(cached) as HealthAthlete;
+  }
+  const res = await client.fetch("/athlete");
+  assertOk(res);
+  const a = (await res.json()) as {
+    id?: number;
+    username?: string;
+    firstname?: string;
+    lastname?: string;
+  };
+  const profile: HealthAthlete = {
+    id: a.id ?? null,
+    username: a.username ?? null,
+    firstname: a.firstname,
+    lastname: a.lastname,
+  };
+  await tokenCache.put(ATHLETE_PROFILE_CACHE_KEY, JSON.stringify(profile), {
+    expirationTtl: ATHLETE_PROFILE_TTL_SECONDS,
+  });
+  return profile;
+}
+
+interface HealthRateLimit {
+  shortTermLimit: number;
+  shortTermUsage: number;
+  dailyLimit: number;
+  dailyUsage: number;
+  updated_at: number | null;
+}
+
+async function readLatestRateLimit(tokenCache: KVNamespace): Promise<HealthRateLimit | null> {
+  const raw = await tokenCache.get(RATE_LIMIT_KV_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as HealthRateLimit;
+  } catch {
+    return null;
+  }
+}
+
+async function readCacheStats(
+  streamCache: KVNamespace
+): Promise<{ activity_summaries: number; stream_entries: number; lap_entries: number }> {
+  // KV list returns up to 1000 keys per page. We page once: anything beyond
+  // that means the cache is large enough that the exact count doesn't matter
+  // for diagnostics. Counts saturate at KV_LIST_LIMIT.
+  const result = await streamCache.list({ limit: KV_LIST_LIMIT });
+  let activitySummaries = 0;
+  let streamEntries = 0;
+  let lapEntries = 0;
+  for (const k of result.keys) {
+    if (k.name.startsWith("streams:")) streamEntries++;
+    else if (k.name.startsWith("activity:")) activitySummaries++;
+    else if (k.name.startsWith("laps:")) lapEntries++;
+  }
+  return {
+    activity_summaries: activitySummaries,
+    stream_entries: streamEntries,
+    lap_entries: lapEntries,
+  };
 }
