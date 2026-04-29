@@ -800,8 +800,8 @@ describe("health (D2)", () => {
 
   it("counts cache entries by prefix", async () => {
     const streamCache = mockKv();
-    await streamCache.put("streams:1:all", "{}");
-    await streamCache.put("streams:2:all", "{}");
+    await streamCache.put("static:streams:1:all", "{}");
+    await streamCache.put("static:streams:2:all", "{}");
     await streamCache.put("activity:1:summary", "{}");
     await streamCache.put("laps:1", "[]");
     await streamCache.put("laps:2", "[]");
@@ -815,5 +815,165 @@ describe("health (D2)", () => {
       await h.mcpClient.callTool({ name: "health", arguments: {} })
     ) as { cache: { activity_summaries: number; stream_entries: number; lap_entries: number } };
     expect(data.cache).toEqual({ activity_summaries: 1, stream_entries: 2, lap_entries: 3 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// get_cache_stats
+// ---------------------------------------------------------------------------
+
+describe("get_cache_stats", () => {
+  it("returns empty list when no streams are cached", async () => {
+    const h = await createHarness([]);
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_cache_stats", arguments: {} })
+    ) as { cached_stream_count: number; cached_activity_ids: number[] };
+    expect(data.cached_stream_count).toBe(0);
+    expect(data.cached_activity_ids).toEqual([]);
+  });
+
+  it("lists activity IDs with cached streams, sorted newest-first", async () => {
+    const streamCache = mockKv();
+    await streamCache.put("static:streams:100:all", "{}");
+    await streamCache.put("static:streams:200:all", "{}");
+    await streamCache.put("static:streams:50:all", "{}");
+    await streamCache.put("activity:100:summary", "{}"); // should not appear
+    const h = await createHarness([], { streamCache });
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_cache_stats", arguments: {} })
+    ) as { cached_stream_count: number; cached_activity_ids: number[] };
+    expect(data.cached_stream_count).toBe(3);
+    expect(data.cached_activity_ids).toEqual([200, 100, 50]);
+  });
+
+  it("does not count another user's cached streams", async () => {
+    const streamCache = mockKv();
+    await streamCache.put("static:streams:100:all", "{}");
+    await streamCache.put("otheruser:streams:999:all", "{}");
+    // createHarness uses no userOAuthToken, so userPrefix = "static"
+    const h = await createHarness([], { streamCache });
+    afterEach(() => h.close());
+    const data = parseResult(
+      await h.mcpClient.callTool({ name: "get_cache_stats", arguments: {} })
+    ) as { cached_stream_count: number; cached_activity_ids: number[] };
+    expect(data.cached_stream_count).toBe(1);
+    expect(data.cached_activity_ids).toEqual([100]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP Resources
+// ---------------------------------------------------------------------------
+
+describe("MCP Resources", () => {
+  it("lists strava://athlete and strava://stats resources", async () => {
+    const h = await createHarness([]);
+    afterEach(() => h.close());
+    const { resources } = await h.mcpClient.listResources();
+    const uris = resources.map((r) => r.uri);
+    expect(uris).toContain("strava://athlete");
+    expect(uris).toContain("strava://stats");
+  });
+
+  it("strava://athlete resource returns athlete JSON", async () => {
+    const profile = { id: 42, username: "ada", firstname: "Ada", lastname: "L" };
+    const h = await createHarness([["/athlete", profile]]);
+    afterEach(() => h.close());
+    const result = await h.mcpClient.readResource({ uri: "strava://athlete" });
+    expect(result.contents).toHaveLength(1);
+    const content = result.contents[0] as { uri: string; mimeType: string; text: string };
+    expect(content.uri).toBe("strava://athlete");
+    expect(content.mimeType).toBe("application/json");
+    const parsed = JSON.parse(content.text);
+    expect(parsed.id).toBe(42);
+    expect(parsed.username).toBe("ada");
+  });
+
+  it("strava://stats resource returns stats JSON", async () => {
+    const stats = { recent_run_totals: { distance: 50000 }, all_run_totals: { distance: 5000000 } };
+    const h = await createHarness([
+      ["/athlete", { id: 7 }],
+      ["/athletes/7/stats", stats],
+    ]);
+    afterEach(() => h.close());
+    const result = await h.mcpClient.readResource({ uri: "strava://stats" });
+    const content = result.contents[0] as { text: string };
+    const parsed = JSON.parse(content.text);
+    expect(parsed.recent_run_totals.distance).toBe(50000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP Prompts
+// ---------------------------------------------------------------------------
+
+describe("MCP Prompts", () => {
+  const EXPECTED_PROMPTS = [
+    "analyse-recent-training",
+    "pr-history",
+    "compare-weeks",
+    "activity-deep-dive",
+    "fitness-trends",
+  ];
+
+  it("lists all expected prompts", async () => {
+    const h = await createHarness([]);
+    afterEach(() => h.close());
+    const { prompts } = await h.mcpClient.listPrompts();
+    const names = prompts.map((p) => p.name);
+    for (const name of EXPECTED_PROMPTS) {
+      expect(names).toContain(name);
+    }
+  });
+
+  it("analyse-recent-training returns a user message with days in it", async () => {
+    const h = await createHarness([]);
+    afterEach(() => h.close());
+    const result = await h.mcpClient.getPrompt({
+      name: "analyse-recent-training",
+      arguments: { days: "14", activity_type: "Run" },
+    });
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0].role).toBe("user");
+    const content = result.messages[0].content as { type: string; text: string };
+    expect(content.type).toBe("text");
+    expect(content.text).toContain("14");
+    expect(content.text).toContain("Run");
+  });
+
+  it("pr-history returns a user message mentioning the distance", async () => {
+    const h = await createHarness([]);
+    afterEach(() => h.close());
+    const result = await h.mcpClient.getPrompt({
+      name: "pr-history",
+      arguments: { distance: "10k" },
+    });
+    expect(result.messages[0].role).toBe("user");
+    const content = result.messages[0].content as { type: string; text: string };
+    expect(content.text).toContain("10k");
+  });
+
+  it("activity-deep-dive includes the activity_id in the message", async () => {
+    const h = await createHarness([]);
+    afterEach(() => h.close());
+    const result = await h.mcpClient.getPrompt({
+      name: "activity-deep-dive",
+      arguments: { activity_id: "12345678" },
+    });
+    const content = result.messages[0].content as { type: string; text: string };
+    expect(content.text).toContain("12345678");
+  });
+
+  it("compare-weeks and fitness-trends work with no required args", async () => {
+    const h = await createHarness([]);
+    afterEach(() => h.close());
+    const [compareResult, trendsResult] = await Promise.all([
+      h.mcpClient.getPrompt({ name: "compare-weeks", arguments: {} }),
+      h.mcpClient.getPrompt({ name: "fitness-trends", arguments: {} }),
+    ]);
+    expect(compareResult.messages).toHaveLength(1);
+    expect(trendsResult.messages).toHaveLength(1);
   });
 });

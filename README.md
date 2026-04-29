@@ -41,7 +41,7 @@ See [Deploy your own](#deploy-your-own) below to run your own instance on Cloudf
 
 ## Available tools
 
-19 read-only tools covering activities, streams, segments, routes, gear, and diagnostics.
+20 read-only tools covering activities, streams, segments, routes, gear, and diagnostics.
 
 | Tool | Returns |
 |------|---------|
@@ -63,7 +63,29 @@ See [Deploy your own](#deploy-your-own) below to run your own instance on Cloudf
 | `list_routes` | Your saved routes with pagination |
 | `get_route_details` | Full route metadata plus stream data (latlng, distance, altitude) |
 | `list_gear` | Bikes and shoes with mileage |
+| `get_cache_stats` | Which activity IDs have cached streams for the current user, plus rate-limit budget |
 | `health` | Diagnostics: athlete ID, Strava rate limits (overall + read tier), cache stats, worker version |
+
+### Resources
+
+Two persistent [MCP resources](https://modelcontextprotocol.io/docs/concepts/resources) are exposed as URIs. Clients that support resources can subscribe to these and read them without a tool call — useful as always-available context.
+
+| URI | Contents |
+|-----|----------|
+| `strava://athlete` | Your Strava athlete profile (name, location, weight, FTP, measurement preference) |
+| `strava://stats` | Lifetime statistics: recent, YTD, and all-time totals by sport |
+
+### Prompts
+
+Five [MCP prompts](https://modelcontextprotocol.io/docs/concepts/prompts) are pre-wired for common analyses. Clients that support prompts (e.g. Claude's prompt picker) surface these as one-click templates.
+
+| Prompt | What it asks |
+|--------|-------------|
+| `analyse-recent-training` | Training load, trends, and patterns over the last N days |
+| `pr-history` | PR progression at a target distance, sorted fastest-first |
+| `compare-weeks` | Side-by-side comparison of this week vs last week |
+| `activity-deep-dive` | Thorough breakdown of a single activity: pacing, HR, zones, laps |
+| `fitness-trends` | Long-range fitness trends across N months |
 
 ### Stream data
 

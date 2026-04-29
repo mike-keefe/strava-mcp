@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ReadResourceResult, GetPromptResult } from "@modelcontextprotocol/sdk/types.js";
 import { StravaApiError, RATE_LIMIT_KV_KEY } from "./client.js";
 import type { StravaClient } from "./client.js";
 import { handleStravaError, assertOk } from "./errors.js";
@@ -679,6 +680,229 @@ export function registerStravaTools(
     }
   );
 
+  // get_cache_stats — per-user view of which activities have cached streams.
+  server.tool(
+    "get_cache_stats",
+    "Lists activity IDs that have cached stream data for the current user. Also shows current Strava rate-limit budget. Useful for understanding what's already cached before issuing stream fetches.",
+    {},
+    async () => {
+      try {
+        const listed = await streamCache.list({ prefix: `${userPrefix}:streams:`, limit: KV_LIST_LIMIT });
+        const activityIds: number[] = [];
+        for (const k of listed.keys) {
+          // Key format: {userPrefix}:streams:{activityId}:all
+          const parts = k.name.split(":");
+          const idPart = parts[2];
+          if (idPart) {
+            const id = parseInt(idPart, 10);
+            if (!Number.isNaN(id)) activityIds.push(id);
+          }
+        }
+        activityIds.sort((a, b) => b - a);
+        const rateLimit = await readLatestRateLimit(tokenCache);
+        return ok({
+          cached_stream_count: activityIds.length,
+          cached_activity_ids: activityIds,
+          list_truncated: !listed.list_complete,
+          rate_limit: rateLimit,
+        });
+      } catch (err) {
+        return handleStravaError(err);
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // MCP Resources — persistent data URIs the client can subscribe to and read
+  // without a tool call. Useful as always-available context for the LLM.
+  // ---------------------------------------------------------------------------
+
+  server.registerResource(
+    "athlete-profile",
+    "strava://athlete",
+    {
+      title: "Athlete Profile",
+      description: "Your Strava athlete profile: name, location, weight, FTP, measurement preference, and account details.",
+      mimeType: "application/json",
+    },
+    async (uri): Promise<ReadResourceResult> => {
+      const res = await client.fetch("/athlete");
+      assertOk(res);
+      const profile = await res.json();
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: "application/json",
+            text: JSON.stringify(profile, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerResource(
+    "athlete-stats",
+    "strava://stats",
+    {
+      title: "Athlete Statistics",
+      description: "Your Strava lifetime statistics: recent (4-week), YTD, and all-time totals for runs, rides, and swims.",
+      mimeType: "application/json",
+    },
+    async (uri): Promise<ReadResourceResult> => {
+      const athleteRes = await client.fetch("/athlete");
+      assertOk(athleteRes);
+      const athlete = (await athleteRes.json()) as { id: number };
+      const statsRes = await client.fetch(`/athletes/${athlete.id}/stats`);
+      assertOk(statsRes);
+      const stats = await statsRes.json();
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: "application/json",
+            text: JSON.stringify(stats, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // MCP Prompts — pre-defined query templates users can invoke from their
+  // client's prompt picker. Each injects context and frames the question so
+  // the model has everything it needs to answer immediately.
+  // ---------------------------------------------------------------------------
+
+  server.registerPrompt(
+    "analyse-recent-training",
+    {
+      title: "Analyse Recent Training",
+      description: "Comprehensive analysis of training load, trends, and patterns over a recent window.",
+      argsSchema: {
+        days: z.string().optional().describe("Number of days to look back (default: 28)"),
+        activity_type: z.string().optional().describe("Limit to a sport, e.g. 'Run' or 'Ride'"),
+      },
+    },
+    ({ days, activity_type }): GetPromptResult => {
+      const window = days ?? "28";
+      const sport = activity_type ? ` for ${activity_type} activities` : "";
+      return {
+        description: `Analyse training over the last ${window} days`,
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Please analyse my Strava training${sport} over the last ${window} days.\n\nFetch my recent activities and give me:\n1. Volume summary (distance, time, elevation)\n2. Weekly training load trends\n3. Heart rate and pace patterns\n4. Notable workouts (longest, hardest, best paced)\n5. Any observations or recommendations\n\nUse the strava-mcp tools to pull the data, then do the analysis yourself.`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerPrompt(
+    "pr-history",
+    {
+      title: "PR History",
+      description: "Show PR progression at a target race distance over time, sorted fastest first.",
+      argsSchema: {
+        distance: z.string().describe("Strava best-effort name, e.g. '5k', '10k', 'Half-Marathon', 'Marathon'"),
+      },
+    },
+    ({ distance }): GetPromptResult => {
+      return {
+        description: `PR history at ${distance}`,
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Show me my PR progression at ${distance} over all time.\n\nUse get_athlete_best_efforts to pull all efforts at this distance, then:\n1. List them sorted fastest-first with date and activity name\n2. Identify the current PR and when it was set\n3. Show improvement over time (first effort vs. current PR)\n4. Note any PR streaks or gaps in racing\n5. If I have enough data, extrapolate when I might crack the next milestone`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerPrompt(
+    "compare-weeks",
+    {
+      title: "Compare This Week vs Last Week",
+      description: "Side-by-side comparison of training volume and quality between the current and previous week.",
+      argsSchema: {},
+    },
+    (): GetPromptResult => {
+      return {
+        description: "Compare this week vs last week",
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Compare my training this week against last week.\n\nUse get_athlete_summary with granularity 'week' (or fetch activities directly) and compare:\n1. Total distance, time, and elevation\n2. Average pace / speed\n3. Average heart rate\n4. Number of sessions and sport breakdown\n5. Notable differences — is this week a step-up, recovery, or similar load?`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerPrompt(
+    "activity-deep-dive",
+    {
+      title: "Activity Deep Dive",
+      description: "Thorough breakdown of a single activity: pacing, HR zones, laps, effort distribution, and segment highlights.",
+      argsSchema: {
+        activity_id: z.string().describe("The Strava activity ID (numeric)"),
+      },
+    },
+    ({ activity_id }): GetPromptResult => {
+      return {
+        description: `Deep dive: activity ${activity_id}`,
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Give me a thorough breakdown of Strava activity ${activity_id}.\n\nFetch details, streams, laps, and zones, then analyse:\n1. Overall stats (distance, time, pace/speed, elevation, HR)\n2. Pacing strategy — positive or negative split? Consistent?\n3. Heart rate progression throughout the effort\n4. Lap-by-lap breakdown if laps are present\n5. Zone distribution (time in each HR zone)\n6. Any notable segment efforts or PRs\n7. How does this effort compare to typical for this distance?`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerPrompt(
+    "fitness-trends",
+    {
+      title: "Fitness Trends",
+      description: "Long-range trend analysis across months: volume progression, pace improvement, HR efficiency.",
+      argsSchema: {
+        months: z.string().optional().describe("Number of months to look back (default: 6)"),
+        activity_type: z.string().optional().describe("Limit to a sport, e.g. 'Run' or 'Ride'"),
+      },
+    },
+    ({ months, activity_type }): GetPromptResult => {
+      const window = months ?? "6";
+      const sport = activity_type ? ` ${activity_type}` : "";
+      return {
+        description: `${sport} fitness trends over ${window} months`,
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Analyse my${sport} fitness trends over the last ${window} months.\n\nUse get_athlete_summary with monthly granularity, then look at:\n1. Month-by-month volume progression (distance, time, elevation)\n2. Pace or speed improvement trend\n3. Heart rate efficiency (same pace, lower HR = improved fitness)\n4. Consistency: any gaps, big jumps, or tapers?\n5. Peak month vs. current: am I building, maintaining, or declining?\n6. Suggested focus areas for the next block based on what you see`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
   // D2 — health: deployment + cache + rate-limit snapshot for diagnostics.
   server.tool(
     "health",
@@ -847,7 +1071,7 @@ async function readCacheStats(
   let streamEntries = 0;
   let lapEntries = 0;
   for (const k of result.keys) {
-    if (k.name.startsWith("streams:")) streamEntries++;
+    if (k.name.includes(":streams:")) streamEntries++;
     else if (k.name.startsWith("activity:")) activitySummaries++;
     else if (k.name.startsWith("laps:")) lapEntries++;
   }
