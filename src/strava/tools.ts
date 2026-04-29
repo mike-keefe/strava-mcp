@@ -4,6 +4,7 @@ import { StravaApiError } from "./client.js";
 import type { StravaClient } from "./client.js";
 import { handleStravaError, assertOk } from "./errors.js";
 import { fetchActivityStreams, fetchSegmentEffortStreams } from "./streams.js";
+import { fetchActivitySummary } from "./activity.js";
 import type { StreamType } from "./types.js";
 
 function ok(data: unknown): { content: [{ type: "text"; text: string }] } {
@@ -159,12 +160,25 @@ export function registerStravaTools(
     },
     async ({ activity_id, stream_types, resolution, downsample_to_seconds, format }) => {
       try {
+        // When no stream_types is supplied, fetch the activity summary so we
+        // can pick sport-aware defaults (e.g. don't ask for watts on a Run).
+        // The summary is cached, so this is cheap on repeat calls.
+        let sportType: string | undefined;
+        if (!stream_types) {
+          try {
+            const summary = await fetchActivitySummary(client, streamCache, activity_id);
+            sportType = summary.sport_type ?? summary.type;
+          } catch {
+            // If the summary fetch fails we'll fall back to generic defaults.
+          }
+        }
         const result = await fetchActivityStreams(client, streamCache, {
           activityId: activity_id,
           streamTypes: stream_types as StreamType[] | undefined,
           resolution: resolution as "low" | "medium" | "high" | "all" | undefined,
           downsampleToSeconds: downsample_to_seconds,
           format: format as "arrays" | "rows" | undefined,
+          sportType,
         });
         return ok(result);
       } catch (err) {

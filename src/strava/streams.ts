@@ -8,6 +8,7 @@ export interface StreamsParams {
   resolution?: StreamResolution;
   downsampleToSeconds?: number;
   format?: "arrays" | "rows";
+  sportType?: string;
 }
 
 const DEFAULT_STREAM_TYPES: StreamType[] = [
@@ -18,6 +19,32 @@ const DEFAULT_STREAM_TYPES: StreamType[] = [
   "altitude",
   "cadence",
 ];
+
+// Sport-aware default stream types. Avoids asking for watts on Runs (which
+// commonly don't have a power stream) and includes grade_smooth for outdoor
+// efforts where elevation matters. Used when the caller doesn't pass an
+// explicit stream_types list. The retry-without-watts fix in
+// fetchAllStreamsWithRetry still protects us when the device stream set
+// disagrees with what these defaults assume.
+export function defaultsForSport(sportType: string | undefined): StreamType[] {
+  switch (sportType) {
+    case "Run":
+    case "TrailRun":
+    case "Walk":
+    case "Hike":
+      return ["time", "distance", "heartrate", "velocity_smooth", "altitude", "cadence", "grade_smooth"];
+    case "Ride":
+    case "VirtualRide":
+    case "EBikeRide":
+    case "GravelRide":
+    case "MountainBikeRide":
+      return ["time", "distance", "heartrate", "velocity_smooth", "altitude", "cadence", "watts", "grade_smooth"];
+    case "Swim":
+      return ["time", "distance", "velocity_smooth", "cadence"];
+    default:
+      return DEFAULT_STREAM_TYPES;
+  }
+}
 
 const ALL_STREAM_TYPES: StreamType[] = [
   "time",
@@ -92,13 +119,15 @@ export async function fetchActivityStreams(
 ): Promise<StreamsResult> {
   const {
     activityId,
-    streamTypes = DEFAULT_STREAM_TYPES,
+    streamTypes,
     resolution = "all",
     downsampleToSeconds,
     format = "arrays",
+    sportType,
   } = params;
 
-  const requestedTypes = streamTypes.filter((t): t is StreamType =>
+  const effectiveStreamTypes = streamTypes ?? defaultsForSport(sportType);
+  const requestedTypes = effectiveStreamTypes.filter((t): t is StreamType =>
     ALL_STREAM_TYPES.includes(t)
   );
 
